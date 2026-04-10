@@ -1,0 +1,9 @@
+# managed by kdev
+git:
+  paging:
+    colorArg: always
+    pager: delta --dark --paging=never
+os:
+  editCommand: 'vim'
+  editCommandTemplate: '{{editor}} {{filename}}'
+  suspendOnEdit: true

@@ -1,0 +1,108 @@
+# managed by kdev — https://github.com/kmakiela96/kdev
+
+# ─── Basic settings ───────────────────────────────────────────────────────────
+
+set shellopts '-eu'
+set ifs "\n"
+set scrolloff 10
+set icons
+set period 1
+set hiddenfiles ".*:*.aux:*.log:*.bbl:*.bcf:*.blg:*.run.xml"
+set previewer '~/.config/lf/scope'
+set autoquit true
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+# Text files open in $EDITOR (neovim); everything else uses macOS open
+cmd open &{{
+    case $(file --mime-type -Lb "$f") in
+        text/*|application/json|application/javascript|application/x-shellscript|\
+        application/xml|application/toml|application/x-yaml)
+            lf -remote "send $id \$nvim \"$f\""
+            ;;
+        *)
+            open "$f"
+            ;;
+    esac
+}}
+
+cmd mkdir $mkdir -p "$@"
+
+cmd code-search ${{
+    printf 'search: '
+    read query
+    pattern="$(printf '%s' "$query" | sed 's/\*/.*/g')"
+    result=$({ fd -e scala -e rs -e hs -e c -e h | xargs grep -rl "$pattern" 2>/dev/null || true; } | fzf)
+    [ -n "$result" ] && lf -remote "send $id select \"$PWD/$result\""
+}}
+
+cmd extract ${{
+    set -f
+    case $fx in
+        *.tar.bz2) tar xjf $fx ;;
+        *.tar.gz)  tar xzf $fx ;;
+        *.bz2)     bunzip2 $fx ;;
+        *.gz)      gunzip $fx ;;
+        *.tar)     tar xf $fx ;;
+        *.tbz2)    tar xjf $fx ;;
+        *.tgz)     tar xzf $fx ;;
+        *.zip)     unzip $fx ;;
+        *.7z)      7z x $fx ;;
+        *.tar.xz)  tar xf $fx ;;
+        *.rar)     unrar e $fx ;;
+    esac
+}}
+
+cmd delete ${{
+    clear; tput cup $(($(tput lines)/3)); tput bold
+    set -f
+    printf "%s\n\t" "$fx"
+    printf "delete?[y/N] "
+    read ans
+    [ "$ans" = "y" ] && rm -rf -- $fx
+}}
+
+cmd bulkrename ${{
+    tmpfile_old="$(mktemp)"
+    tmpfile_new="$(mktemp)"
+    [ -n "$fs" ] && fs=$(basename -a $fs) || fs=$(ls)
+    echo "$fs" > "$tmpfile_old"
+    echo "$fs" > "$tmpfile_new"
+    $EDITOR "$tmpfile_new"
+    [ "$(wc -l < "$tmpfile_old")" -eq "$(wc -l < "$tmpfile_new")" ] || {
+        rm -f "$tmpfile_old" "$tmpfile_new"; exit 1
+    }
+    paste "$tmpfile_old" "$tmpfile_new" | while IFS="$(printf '\t')" read -r src dst; do
+        [ "$src" = "$dst" ] || [ -e "$dst" ] || mv -- "$src" "$dst"
+    done
+    rm -f "$tmpfile_old" "$tmpfile_new"
+    lf -remote "send $id unselect"
+}}
+
+# ─── Keybindings ─────────────────────────────────────────────────────────────
+
+map <enter> open
+
+# Jump to any file via fzf
+map f $lf -remote "send $id select \"$(fzf)\""
+map C code-search
+
+map H  cd ~
+map g  top
+map D  delete
+map E  extract
+map V  push :!nvim<space>
+map B  bulkrename
+
+# Rename modes
+map A  :rename; cmd-end        # append at end
+map c  push A                  # new name (same as A)
+map I  :rename; cmd-home       # insert at beginning
+map i  :rename                 # before extension
+map a  :rename; cmd-right      # after extension
+
+map r  reload
+map .  set hidden!
+map s  shell
+map x  $$f
+map X  !$f

@@ -1,0 +1,2601 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SCRIPT_NAME="kdev"
+readonly VERSION="2.20.3"
+readonly WORKTREES_DIR=".worktrees"
+
+# ─── Colors ───────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  RED=$'\033[0;31m'
+  GREEN=$'\033[0;32m'
+  YELLOW=$'\033[0;33m'
+  CYAN=$'\033[0;36m'
+  RESET=$'\033[0m'
+else
+  BOLD='' DIM='' RED='' GREEN='' YELLOW='' CYAN='' RESET=''
+fi
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+die()  { echo -e "${RED}error:${RESET} $*" >&2; exit 1; }
+_err() { echo -e "${RED}error:${RESET} $*" >&2; }
+warn() { echo -e "${YELLOW}warn:${RESET} $*" >&2; }
+info() { echo -e "${GREEN}✓${RESET} $*"; }
+dim()  { echo -e "${DIM}$*${RESET}"; }
+step() { echo -e "  $*"; }
+
+# Ask a yes/no question. Default is no. Returns 0 for yes, 1 for no.
+_confirm() {
+  local answer
+  printf "%s [y/N]: " "$1"
+  read -r answer
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+# Resolve the absolute path of this script, following symlinks.
+_script_path() {
+  local src="${BASH_SOURCE[0]:-$0}"
+  local real
+  real="$(readlink -f "$src" 2>/dev/null)" || real="$src"
+  echo "$real"
+}
+
+# ─── Git helpers ──────────────────────────────────────────────────────────────
+
+# Find the root of the main repo, even when called from inside a worktree
+# created by this tool (.worktrees/<name>/).
+_find_repo_root() {
+  local toplevel
+  toplevel="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+
+  local parent_dir parent_name
+  parent_dir="$(dirname "$toplevel")"
+  parent_name="$(basename "$parent_dir")"
+
+  if [[ "$parent_name" == "$WORKTREES_DIR" ]]; then
+    # Inside .worktrees/<name> — repo root is two levels up
+    dirname "$parent_dir"
+  else
+    echo "$toplevel"
+  fi
+}
+
+# Detect the default branch (main or master). Tries origin/HEAD first,
+# then checks for common local branch names.
+_git_default_branch() {
+  local repo="$1"
+  local remote_head
+  remote_head="$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)" && {
+    echo "${remote_head#refs/remotes/origin/}"
+    return 0
+  }
+  local branch
+  for branch in main master; do
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+      echo "$branch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_git_is_dirty() {
+  git -C "$1" status --porcelain 2>/dev/null | grep -q .
+}
+
+# Fetch origin and warn if default branch is behind remote.
+# Returns 0 (proceed) or 1 (user aborted).
+_git_fetch_and_check() {
+  local repo="$1"
+  local default_branch
+  default_branch="$(_git_default_branch "$repo")" || return 0
+
+  # No remote → nothing to check
+  git -C "$repo" remote | grep -q . || return 0
+
+  step "Fetching origin..."
+  git -C "$repo" fetch origin --quiet 2>/dev/null || {
+    warn "Failed to fetch origin — continuing with local state."
+    return 0
+  }
+
+  # Check if remote tracking branch exists
+  local remote_ref="refs/remotes/origin/${default_branch}"
+  git -C "$repo" show-ref --verify --quiet "$remote_ref" 2>/dev/null || return 0
+
+  local local_rev remote_rev
+  local_rev="$(git -C "$repo" rev-parse "refs/heads/${default_branch}" 2>/dev/null)" || return 0
+  remote_rev="$(git -C "$repo" rev-parse "$remote_ref" 2>/dev/null)" || return 0
+
+  if [[ "$local_rev" == "$remote_rev" ]]; then
+    return 0
+  fi
+
+  local behind
+  behind="$(git -C "$repo" rev-list --count "refs/heads/${default_branch}..${remote_ref}" 2>/dev/null)" || behind=0
+
+  if [[ "$behind" -gt 0 ]]; then
+    warn "Local ${BOLD}${default_branch}${RESET} is ${BOLD}${behind}${RESET} commit(s) behind ${BOLD}origin/${default_branch}${RESET}."
+    if ! _confirm "  Continue creating worktree from local ${default_branch}?"; then
+      _err "Aborted. Pull ${default_branch} first: git checkout ${default_branch} && git pull"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Returns 0 if the directory is a functioning git worktree (git link resolves).
+# A broken worktree has a .git file pointing at a path that no longer exists
+# (e.g. after the main repo was renamed/moved).
+_git_worktree_valid() {
+  git -C "$1" rev-parse --git-dir &>/dev/null
+}
+
+# Add an entry to .gitignore if not already present.
+_ensure_gitignore() {
+  local root="$1" entry="$2"
+  local gitignore="$root/.gitignore"
+
+  if [[ -f "$gitignore" ]] && grep -qxF "$entry" "$gitignore"; then
+    return 0
+  fi
+
+  echo "$entry" >> "$gitignore"
+}
+
+# ─── tmux helpers ─────────────────────────────────────────────────────────────
+
+# Sanitize a name for use as a tmux session name. tmux interprets dots and
+# colons specially in target strings, so replace them with underscores.
+_tmux_session_name() {
+  local name="$1"
+  name="${name//./_}"
+  name="${name//:/_}"
+  echo "$name"
+}
+
+_tmux_attach_or_switch() {
+  local session="$1"
+  if [[ -n "${KDEV_TEST_NO_ATTACH:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$session"
+  else
+    tmux attach -t "$session"
+  fi
+}
+
+# ─── Config content generators ────────────────────────────────────────────────
+
+_tmux_conf_content() {
+  cat <<'TMUX_CONF'
+# ~/.config/tmux/tmux.conf — generated by kdev
+
+# ─── Terminal ─────────────────────────────────────────
+set -g default-terminal "tmux-256color"
+set -ag terminal-overrides ",alacritty:RGB"
+
+# ─── General ──────────────────────────────────────────
+set -g mouse on
+set -g base-index 1
+setw -g pane-base-index 1
+set -g history-limit 50000
+set -g escape-time 0
+set -g focus-events on
+set -g renumber-windows on
+
+# ─── Prefix: Ctrl-b (one-shot structural commands) ───
+set -g prefix C-b
+unbind C-a
+
+# ─── Splits (prefix + |/-) ───────────────────────────
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+unbind '"'
+unbind %
+
+# ─── Quick program windows (prefix) ──────────────────
+bind g new-window -n "lazygit" -c "#{pane_current_path}" "lazygit"
+bind e new-window -n "editor" -c "#{pane_current_path}" "nvim ."
+
+# ─── Nav mode: Ctrl-a toggles persistent vim nav ─────
+bind -n C-a switch-client -T nav
+bind -T nav C-a switch-client -T root
+bind -T nav Escape switch-client -T root
+
+# Nav: pane navigation (hjkl) — sticky
+bind -T nav h select-pane -L \; switch-client -T nav
+bind -T nav j select-pane -D \; switch-client -T nav
+bind -T nav k select-pane -U \; switch-client -T nav
+bind -T nav l select-pane -R \; switch-client -T nav
+
+# Nav: pane swap (HJKL) — sticky
+bind -T nav H swap-pane -d -t '{left-of}'  \; switch-client -T nav
+bind -T nav J swap-pane -d -t '{down-of}'  \; switch-client -T nav
+bind -T nav K swap-pane -d -t '{up-of}'    \; switch-client -T nav
+bind -T nav L swap-pane -d -t '{right-of}' \; switch-client -T nav
+
+# Nav: zoom toggle (f) — sticky
+bind -T nav f resize-pane -Z \; switch-client -T nav
+
+# Nav: kill pane (d) — sticky
+bind -T nav d kill-pane \; switch-client -T nav
+
+# Nav: new pi agent pane (p) — vertical split, exits nav
+bind -T nav p split-window -v -c "#{pane_current_path}" "pi" \; switch-client -T root
+
+# Nav: new terminal pane (t) — vertical split, exits nav
+bind -T nav t split-window -v -c "#{pane_current_path}" \; switch-client -T root
+
+# ─── Window navigation ───────────────────────────────
+bind -n M-1 select-window -t 1
+bind -n M-2 select-window -t 2
+bind -n M-3 select-window -t 3
+bind -n M-4 select-window -t 4
+bind -n M-5 select-window -t 5
+bind -n M-6 select-window -t 6
+bind -n M-7 select-window -t 7
+bind -n M-8 select-window -t 8
+bind -n M-9 select-window -t 9
+
+# ─── Copy mode (vi keys) ─────────────────────────────
+setw -g mode-keys vi
+
+# ─── Status bar (Tokyo Night) ────────────────────────
+set -g status-style "bg=#1a1b26,fg=#565f89"
+set -g status-left "#[fg=#7aa2f7,bold] #S #{?#{==:#{client_key_table},nav},#[fg=#e0af68 bold] NAV ,}"
+set -g status-left-length 40
+set -g status-right "#[fg=#565f89] %H:%M "
+set -g window-status-current-format "#[fg=#7aa2f7,bold] #I:#W "
+set -g window-status-format "#[fg=#565f89] #I:#W "
+set -g pane-border-style "fg=#283457"
+set -g pane-active-border-style "fg=#7aa2f7"
+set -g message-style "bg=#1a1b26,fg=#c0caf5"
+
+# ─── tmux-resurrect ──────────────────────────────────
+# prefix + Ctrl-s to save, prefix + Ctrl-r to restore
+if-shell "test -f ~/.config/tmux/plugins/tmux-resurrect/resurrect.tmux" \
+  "run-shell ~/.config/tmux/plugins/tmux-resurrect/resurrect.tmux"
+TMUX_CONF
+}
+
+_alacritty_conf_content() {
+  cat <<'ALACRITTY_CONF'
+# ~/.config/alacritty/alacritty.toml — generated by kdev
+
+[window]
+# Left Option  = Alt (tmux M-1…9 window switching)
+# Right Option = macOS compose (diacritics: ą ć ę ł ń ó ś ź ż)
+option_as_alt = "OnlyLeft"
+ALACRITTY_CONF
+}
+
+
+# ─── Completion generators ────────────────────────────────────────────────────
+
+# Helper used inside both completion functions: lists worktree names from the
+# repo root, tolerating being called from inside a worktree or any subdirectory.
+# Outputs nothing (silently) if not inside a git repo or no worktrees exist.
+_completions_worktrees() {
+  cat <<'SH'
+  local _root
+  _root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+  local _parent_name
+  _parent_name="$(basename "$(dirname "$_root")")"
+  [[ "$_parent_name" == ".worktrees" ]] && _root="$(dirname "$(dirname "$_root")")"
+  local _wt_base="$_root/.worktrees"
+  [[ -d "$_wt_base" ]] || return 0
+  local d
+  for d in "$_wt_base"/*/; do
+    [[ -d "$d" ]] && printf '%s\n' "$(basename "$d")"
+  done
+SH
+}
+
+_completions_zsh() {
+  local worktree_finder
+  worktree_finder="$(_completions_worktrees)"
+
+  cat <<ZSHCOMP
+# kdev zsh completions — generated by: eval "\$(kdev --completions zsh)"
+_kdev() {
+  local state
+  local -a subcommands worktrees
+
+  subcommands=(
+    'dev:Create worktree and start dev session'
+    'here:Open dev session for current branch (no worktree)'
+    'launch:Launch session for existing worktree'
+    'list:List worktrees and their status'
+    'delete:Remove a worktree'
+    'setup:Install tools and write configs'
+  )
+
+  _kdev_worktrees() {
+${worktree_finder}
+  }
+
+  _arguments -C \\
+    '1: :->first' \\
+    '*: :->rest' && return
+
+  case "\$state" in
+    first)
+      local -a wts=("\${(@f)\$(_kdev_worktrees)}")
+      local -a wt_specs=()
+      local w
+      for w in "\${wts[@]}"; do
+        wt_specs+=("\${w}:worktree")
+      done
+      _describe 'command or worktree' subcommands -- wt_specs
+      ;;
+    rest)
+      case "\${words[2]}" in
+        dev)
+          case "\${words[CURRENT]}" in
+            --*) _arguments '--from[Base ref for new branch]:ref' '--help' ;;
+            *)
+              if [[ "\${words[CURRENT-1]}" == "--from" ]]; then
+                # completing a ref — skip
+                return
+              fi
+              local -a wts=("\${(@f)\$(_kdev_worktrees)}")
+              [[ \${#wts[@]} -gt 0 ]] && _describe 'existing worktree' wts
+              ;;
+          esac
+          ;;
+        launch)
+          local -a wts=("\${(@f)\$(_kdev_worktrees)}")
+          [[ \${#wts[@]} -gt 0 ]] && _describe 'worktree' wts
+          ;;
+        delete)
+          case "\${words[CURRENT]}" in
+            --*) _arguments '--force[Force removal]' '--help' ;;
+            *)
+              local -a wts=("\${(@f)\$(_kdev_worktrees)}")
+              [[ \${#wts[@]} -gt 0 ]] && _describe 'worktree' wts
+              ;;
+          esac
+          ;;
+        setup)
+          _arguments '--plan[Dry run]' '--help'
+          ;;
+        --completions)
+          local shells=(bash zsh)
+          _describe 'shell' shells
+          ;;
+        *)
+          _arguments '--version' '--help' '--test' '--completions[Output completions]:shell:(bash zsh)'
+          ;;
+      esac
+      ;;
+  esac
+}
+compdef _kdev kdev
+ZSHCOMP
+}
+
+_completions_bash() {
+  local worktree_finder
+  worktree_finder="$(_completions_worktrees)"
+
+  cat <<BASHCOMP
+# kdev bash completions — generated by: eval "\$(kdev --completions bash)"
+_kdev() {
+  local cur prev words cword
+  _init_completion 2>/dev/null || {
+    cur="\${COMP_WORDS[COMP_CWORD]}"
+    prev="\${COMP_WORDS[COMP_CWORD-1]}"
+    words=("\${COMP_WORDS[@]}")
+    cword=\$COMP_CWORD
+  }
+
+  _kdev_worktrees() {
+${worktree_finder}
+  }
+
+  local subcommands="dev here launch list delete setup"
+
+  if [[ \$cword -eq 1 ]]; then
+    local wts
+    wts="\$(_kdev_worktrees)"
+    COMPREPLY=(\$(compgen -W "\$subcommands \$wts" -- "\$cur"))
+    return
+  fi
+
+  local subcmd="\${words[1]}"
+  case "\$subcmd" in
+    dev)
+      if [[ "\$cur" == --* ]]; then
+        COMPREPLY=(\$(compgen -W "--from --help" -- "\$cur"))
+      else
+        local wts
+        wts="\$(_kdev_worktrees)"
+        [[ -n "\$wts" ]] && COMPREPLY=(\$(compgen -W "\$wts" -- "\$cur"))
+      fi
+      ;;
+    launch)
+      local wts
+      wts="\$(_kdev_worktrees)"
+      [[ -n "\$wts" ]] && COMPREPLY=(\$(compgen -W "\$wts" -- "\$cur"))
+      ;;
+    delete)
+      if [[ "\$cur" == --* ]]; then
+        COMPREPLY=(\$(compgen -W "--force --help" -- "\$cur"))
+      else
+        local wts
+        wts="\$(_kdev_worktrees)"
+        [[ -n "\$wts" ]] && COMPREPLY=(\$(compgen -W "\$wts" -- "\$cur"))
+      fi
+      ;;
+    setup)
+      COMPREPLY=(\$(compgen -W "--plan --help" -- "\$cur"))
+      ;;
+    --completions)
+      COMPREPLY=(\$(compgen -W "bash zsh" -- "\$cur"))
+      ;;
+    *)
+      COMPREPLY=(\$(compgen -W "--version --help --test --completions" -- "\$cur"))
+      ;;
+  esac
+}
+complete -F _kdev kdev
+BASHCOMP
+}
+
+# ─── Setup functions ─────────────────────────────────────────────────────────
+
+_check_brew() {
+  command -v brew &>/dev/null && return 0
+  die "Homebrew not found. Install it first:\n\n  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n\nhttps://brew.sh"
+}
+
+_install_brew_formula() {
+  local name="$1" binary="${2:-$1}"
+  if command -v "$binary" &>/dev/null; then
+    dim "  [installed]  $name"
+    return 0
+  fi
+  step "Installing ${CYAN}${name}${RESET}..."
+  brew install "$name"
+  info "$name installed"
+}
+
+_install_brew_cask() {
+  local name="$1" binary="${2:-$1}"
+  if command -v "$binary" &>/dev/null; then
+    dim "  [installed]  $name"
+    return 0
+  fi
+  step "Installing ${CYAN}${name}${RESET} (cask)..."
+  brew install --cask "$name"
+  info "$name installed"
+}
+
+_install_pi_agent() {
+  if command -v pi &>/dev/null; then
+    dim "  [installed]  pi-coding-agent"
+    return 0
+  fi
+  step "Installing ${CYAN}pi-coding-agent${RESET} via npm..."
+  npm install -g @earendil-works/pi-coding-agent
+  info "pi-coding-agent installed"
+}
+
+_write_tmux_conf() {
+  local conf_dir="$HOME/.config/tmux"
+  local conf_file="$conf_dir/tmux.conf"
+  local old_conf="$HOME/.tmux.conf"
+
+  # Back up ~/.tmux.conf so tmux reads the XDG-compliant location
+  if [[ -f "$old_conf" ]]; then
+    local backup="${old_conf}.bak"
+    local n=1
+    while [[ -f "$backup" ]]; do
+      backup="${old_conf}.bak${n}"
+      ((n++))
+    done
+    mv "$old_conf" "$backup"
+    step "Backed up ${DIM}~/.tmux.conf${RESET} → ${DIM}$(basename "$backup")${RESET}"
+  fi
+
+  mkdir -p "$conf_dir"
+  local new_content
+  new_content="$(_tmux_conf_content)"
+  if [[ -f "$conf_file" ]] && [[ "$(cat "$conf_file")" == "$new_content" ]]; then
+    dim "  [up to date]  tmux.conf"
+    return 0
+  fi
+  printf '%s\n' "$new_content" > "$conf_file"
+  info "Wrote ${conf_file}"
+}
+
+_write_alacritty_conf() {
+  local conf_dir="$HOME/.config/alacritty"
+  local conf_file="$conf_dir/alacritty.toml"
+
+  if [[ -f "$conf_file" ]] && grep -qF "generated by kdev" "$conf_file"; then
+    dim "  [up to date]  alacritty.toml"
+    return 0
+  fi
+
+  if [[ -f "$conf_file" ]]; then
+    local backup="${conf_file}.bak"
+    local n=1
+    while [[ -f "$backup" ]]; do
+      backup="${conf_file}.bak${n}"
+      ((n++))
+    done
+    mv "$conf_file" "$backup"
+    step "Backed up ${DIM}alacritty.toml${RESET} → ${DIM}$(basename "$backup")${RESET}"
+  fi
+
+  mkdir -p "$conf_dir"
+  _alacritty_conf_content > "$conf_file"
+  info "Wrote ${conf_file}"
+}
+
+_write_lazygit_conf() {
+  local src
+  src="$(dirname "$(_script_path)")/.config/lazygit/config.yml"
+
+  if [[ ! -f "$src" ]]; then
+    warn "lazygit config not found at ${src} — skipping."
+    return 0
+  fi
+
+  local conf_dir="$HOME/.config/lazygit"
+  local conf_file="$conf_dir/config.yml"
+
+  if [[ -f "$conf_file" ]] && diff -q "$src" "$conf_file" &>/dev/null; then
+    dim "  [up to date]  lazygit config.yml"
+    return 0
+  fi
+
+  if [[ -f "$conf_file" ]] && ! grep -qF "managed by kdev" "$conf_file"; then
+    local backup="${conf_file}.bak"
+    local n=1
+    while [[ -f "$backup" ]]; do
+      backup="${conf_file}.bak${n}"
+      ((n++)) || true
+    done
+    mv "$conf_file" "$backup"
+    step "Backed up ${DIM}config.yml${RESET} → ${DIM}$(basename "$backup")${RESET}"
+  fi
+
+  mkdir -p "$conf_dir"
+  cp "$src" "$conf_file"
+  info "Wrote ${conf_file}"
+}
+
+
+# Returns 0 if the zsh completions eval line is already present in $1.
+_zshrc_has_completions() {
+  grep -qF "kdev --completions zsh" "$1" 2>/dev/null
+}
+
+# Append the eval line to ~/.zshrc if not already there.
+# Prints to stdout whether it was added or was already present.
+# Returns 0 in both cases; sets caller's _zshrc_modified=true when it writes.
+_append_zsh_completions() {
+  local zshrc="$HOME/.zshrc"
+
+  if _zshrc_has_completions "$zshrc"; then
+    dim "  [up to date]  zsh completions in ~/.zshrc"
+    return 0
+  fi
+
+  {
+    echo ""
+    echo "# kdev shell completions"
+    echo 'eval "$(kdev --completions zsh)"'
+  } >> "$zshrc"
+
+  info "Added shell completions to ~/.zshrc"
+  _zshrc_modified=true
+}
+
+_install_lf_config() {
+  local lf_src
+  lf_src="$(dirname "$(_script_path)")/.config/lf"
+
+  if [[ ! -d "$lf_src" ]]; then
+    warn "lf config not found at ${lf_src} — skipping."
+    return 0
+  fi
+
+  local lf_dest="$HOME/.config/lf"
+
+  # Back up existing config only if it wasn't deployed by kdev
+  if [[ -d "$lf_dest" ]] && ! grep -qF "managed by kdev" "$lf_dest/lfrc" 2>/dev/null; then
+    local backup="${lf_dest}.bak"
+    local n=1
+    while [[ -d "$backup" ]]; do
+      backup="${lf_dest}.bak${n}"
+      ((n++))
+    done
+    mv "$lf_dest" "$backup"
+    step "Backed up ${DIM}~/.config/lf${RESET} → ${DIM}$(basename "$backup")${RESET}"
+  fi
+
+  mkdir -p "$lf_dest"
+  if diff -q "$lf_src/lfrc"  "$lf_dest/lfrc"  &>/dev/null && \
+     diff -q "$lf_src/scope" "$lf_dest/scope" &>/dev/null && \
+     diff -q "$lf_src/icons" "$lf_dest/icons" &>/dev/null; then
+    dim "  [up to date]  lf config"
+    return 0
+  fi
+  cp "$lf_src/lfrc"  "$lf_dest/lfrc"
+  cp "$lf_src/scope" "$lf_dest/scope"
+  cp "$lf_src/icons" "$lf_dest/icons"
+  chmod +x "$lf_dest/scope"
+  info "Installed lf config → ${lf_dest}"
+}
+
+_install_nvim_config() {
+  local nvim_src
+  nvim_src="$(dirname "$(_script_path)")/.config/nvim"
+
+  if [[ ! -d "$nvim_src" ]]; then
+    warn "nvim config not found at ${nvim_src} — skipping."
+    return 0
+  fi
+
+  local nvim_dest="$HOME/.config/nvim"
+
+  # Back up existing config only if it wasn't deployed by kdev
+  if [[ -d "$nvim_dest" ]] && ! grep -qF "managed by kdev" "$nvim_dest/init.lua" 2>/dev/null; then
+    local backup="${nvim_dest}.bak"
+    local n=1
+    while [[ -d "$backup" ]]; do
+      backup="${nvim_dest}.bak${n}"
+      ((n++)) || true
+    done
+    mv "$nvim_dest" "$backup"
+    step "Backed up ${DIM}~/.config/nvim${RESET} → ${DIM}$(basename "$backup")${RESET}"
+  fi
+
+  mkdir -p "$nvim_dest/lua/plugins"
+
+  if diff -q "$nvim_src/init.lua" "$nvim_dest/init.lua" &>/dev/null && \
+     diff -rq "$nvim_src/lua" "$nvim_dest/lua" &>/dev/null; then
+    dim "  [up to date]  nvim config"
+    return 0
+  fi
+
+  cp "$nvim_src/init.lua" "$nvim_dest/init.lua"
+  cp -R "$nvim_src/lua/." "$nvim_dest/lua/"
+  info "Installed nvim config → ${nvim_dest}"
+}
+
+_install_tmux_resurrect() {
+  local plugin_dir="$HOME/.config/tmux/plugins/tmux-resurrect"
+
+  if [[ -d "$plugin_dir" ]]; then
+    dim "  [installed]  tmux-resurrect"
+    return 0
+  fi
+
+  step "Installing ${CYAN}tmux-resurrect${RESET}..."
+  mkdir -p "$(dirname "$plugin_dir")"
+  git clone --quiet https://github.com/tmux-plugins/tmux-resurrect "$plugin_dir"
+  info "tmux-resurrect installed → ${plugin_dir}"
+}
+
+# Copy skills/ from the kdev repo into ~/.agents/skills/.
+# Each skill is a subdirectory containing SKILL.md. Existing skills with the
+# same name are overwritten so updates are picked up on re-run.
+_install_skills() {
+  local skills_src
+  skills_src="$(dirname "$(_script_path)")/skills"
+
+  if [[ ! -d "$skills_src" ]]; then
+    warn "skills/ directory not found next to kdev — skipping."
+    return 0
+  fi
+
+  local dest="$HOME/.agents/skills"
+  mkdir -p "$dest"
+
+  local dir name copied=0 skipped=0
+  for dir in "$skills_src"/*/; do
+    [[ -d "$dir" ]] || continue
+    name="$(basename "$dir")"
+    if [[ -d "$dest/$name" ]] && diff -rq "$dir" "$dest/$name" &>/dev/null; then
+      ((skipped++)) || true
+      continue
+    fi
+    cp -R "$dir" "$dest/$name"
+    ((copied++)) || true
+  done
+
+  if [[ $copied -gt 0 ]]; then
+    info "Installed $copied skill(s) → ${dest}"
+  elif [[ $skipped -gt 0 ]]; then
+    dim "  [up to date]  $skipped skill(s)"
+  else
+    dim "  No skills found in ${skills_src}"
+  fi
+}
+
+_install_global_agents_md() {
+  local src
+  src="$(dirname "$(_script_path)")/global-agents.md"
+
+  if [[ ! -f "$src" ]]; then
+    warn "global-agents.md not found next to kdev — skipping."
+    return 0
+  fi
+
+  local dest_dir="$HOME/.pi/agent"
+  local dest="$dest_dir/AGENTS.md"
+  mkdir -p "$dest_dir"
+  if [[ -f "$dest" ]] && diff -q "$src" "$dest" &>/dev/null; then
+    dim "  [up to date]  global AGENTS.md"
+    return 0
+  fi
+  cp "$src" "$dest"
+  info "Installed global AGENTS.md → ${dest}"
+}
+
+_install_extensions() {
+  local ext_src
+  ext_src="$(dirname "$(_script_path)")/extensions"
+
+  if [[ ! -d "$ext_src" ]]; then
+    warn "extensions/ directory not found next to kdev — skipping."
+    return 0
+  fi
+
+  local dest="$HOME/.pi/agent/extensions"
+  mkdir -p "$dest"
+
+  local dir name copied=0 skipped=0
+  for dir in "$ext_src"/*/; do
+    [[ -d "$dir" ]] || continue
+    name="$(basename "$dir")"
+    if [[ -d "$dest/$name" ]] && diff -rq "$dir" "$dest/$name" &>/dev/null; then
+      ((skipped++)) || true
+      continue
+    fi
+    cp -R "$dir" "$dest/$name"
+    ((copied++)) || true
+  done
+
+  if [[ $copied -gt 0 ]]; then
+    info "Installed $copied extension(s) → ${dest}"
+  elif [[ $skipped -gt 0 ]]; then
+    dim "  [up to date]  $skipped extension(s)"
+  else
+    dim "  No extensions found in ${ext_src}"
+  fi
+}
+
+_install_pi_package() {
+  local pkg="$1"
+  if ! command -v pi &>/dev/null; then
+    warn "pi not found — skipping package install: $pkg"
+    return 0
+  fi
+  # Check if already installed
+  if pi list 2>/dev/null | grep -qF "$pkg"; then
+    dim "  [installed]  pi package: $pkg"
+    return 0
+  fi
+  pi install "npm:$pkg" 2>/dev/null
+  info "Installed pi package: $pkg"
+}
+
+_shell_rc_file() {
+  case "${SHELL:-}" in
+    */zsh)  echo "$HOME/.zshrc" ;;
+    */bash)
+      # macOS uses .bash_profile for login shells
+      if [[ -f "$HOME/.bash_profile" ]]; then
+        echo "$HOME/.bash_profile"
+      else
+        echo "$HOME/.bashrc"
+      fi
+      ;;
+    */fish) echo "$HOME/.config/fish/config.fish" ;;
+    *)      echo "$HOME/.profile" ;;
+  esac
+}
+
+_ensure_pi_fff_override() {
+  local rc
+  rc="$(_shell_rc_file)"
+  if [[ ! -f "$rc" ]]; then
+    warn "${rc} not found — skipping PI_FFF_MODE export."
+    return 0
+  fi
+  if grep -qF "PI_FFF_MODE" "$rc"; then
+    dim "  [up to date]  PI_FFF_MODE in ${rc}"
+    return 0
+  fi
+  {
+    echo ""
+    echo "# fff pi extension: override built-in grep/find"
+    echo 'export PI_FFF_MODE=override'
+  } >> "$rc"
+  info "Added PI_FFF_MODE=override to ${rc}"
+}
+
+# ─── Subcommand: setup ───────────────────────────────────────────────────────
+
+cmd_setup() {
+  local plan_only=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --plan)    plan_only=true ;;
+      --help|-h) usage_setup; exit 0 ;;
+      -*) die "Unknown option: $1." ;;
+      *)  die "Unexpected argument: $1." ;;
+    esac
+    shift
+  done
+
+  echo ""
+  echo -e "${BOLD}${SCRIPT_NAME} setup${RESET}$( $plan_only && echo " ${DIM}(dry run)${RESET}" || true)"
+  echo ""
+
+  if $plan_only; then
+    echo -e "${BOLD}Tools:${RESET}"
+    local tools=(
+      "alacritty:alacritty:cask"
+      "tmux:tmux:formula"
+      "neovim:nvim:formula"
+      "lazygit:lazygit:formula"
+      "lf:lf:formula"
+      "bat:bat:formula"
+      "git-delta:delta:formula"
+      "git:git:formula"
+      "node:npm:formula"
+      "fzf:fzf:formula"
+      "fd:fd:formula"
+      "lynx:lynx:formula"
+    )
+    local entry name binary kind
+    for entry in "${tools[@]}"; do
+      name="${entry%%:*}"; entry="${entry#*:}"
+      binary="${entry%%:*}"; kind="${entry#*:}"
+      if command -v "$binary" &>/dev/null; then
+        echo -e "  ${DIM}[installed]${RESET}       $name"
+      else
+        echo -e "  [would install]  $name ($kind)"
+      fi
+    done
+    if command -v pi &>/dev/null; then
+      echo -e "  ${DIM}[installed]${RESET}       pi-coding-agent"
+    else
+      echo -e "  [would install]  pi-coding-agent (npm)"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Configs:${RESET}"
+
+    if [[ -f "$HOME/.tmux.conf" ]]; then
+      echo "  [would back up]     ~/.tmux.conf → ~/.tmux.conf.bak"
+    fi
+    if [[ -f "$HOME/.config/tmux/tmux.conf" ]]; then
+      if [[ "$(cat "$HOME/.config/tmux/tmux.conf")" == "$(_tmux_conf_content)" ]]; then
+        echo -e "  ${DIM}[up to date]${RESET}        tmux.conf"
+      else
+        echo "  [would overwrite]   ~/.config/tmux/tmux.conf"
+      fi
+    else
+      echo "  [would create]      ~/.config/tmux/tmux.conf"
+    fi
+
+    local alacritty_conf="$HOME/.config/alacritty/alacritty.toml"
+    if [[ -f "$alacritty_conf" ]] && grep -qF "generated by kdev" "$alacritty_conf"; then
+      echo -e "  ${DIM}[up to date]${RESET}        alacritty.toml"
+    elif [[ -f "$alacritty_conf" ]]; then
+      echo "  [would back up]     alacritty.toml → alacritty.toml.bak"
+      echo "  [would create]      ~/.config/alacritty/alacritty.toml"
+    else
+      echo "  [would create]      ~/.config/alacritty/alacritty.toml"
+    fi
+
+    if [[ -d "$HOME/.config/tmux/plugins/tmux-resurrect" ]]; then
+      echo -e "  ${DIM}[installed]${RESET}         tmux-resurrect"
+    else
+      echo "  [would install]     tmux-resurrect plugin"
+    fi
+
+    local zshrc="$HOME/.zshrc"
+    if _zshrc_has_completions "$zshrc"; then
+      echo -e "  ${DIM}[up to date]${RESET}        zsh completions in ~/.zshrc"
+    elif [[ -f "$zshrc" ]]; then
+      echo "  [would append]      zsh completions eval to ~/.zshrc"
+    else
+      echo "  [not found]         ~/.zshrc — will skip completions"
+    fi
+
+    local lf_dest="$HOME/.config/lf"
+    if [[ -f "$lf_dest/lfrc" ]] && grep -qF "managed by kdev" "$lf_dest/lfrc" 2>/dev/null; then
+      echo -e "  ${DIM}[up to date]${RESET}        lf config"
+    elif [[ -d "$lf_dest" ]]; then
+      echo "  [would back up]     ~/.config/lf → ~/.config/lf.bak"
+      echo "  [would install]     lf config → ~/.config/lf"
+    else
+      echo "  [would install]     lf config → ~/.config/lf"
+    fi
+
+    local nvim_dest="$HOME/.config/nvim"
+    if [[ -f "$nvim_dest/init.lua" ]] && grep -qF "managed by kdev" "$nvim_dest/init.lua" 2>/dev/null; then
+      echo -e "  ${DIM}[up to date]${RESET}        nvim config"
+    elif [[ -d "$nvim_dest" ]]; then
+      echo "  [would back up]     ~/.config/nvim → ~/.config/nvim.bak"
+      echo "  [would install]     nvim config → ~/.config/nvim"
+    else
+      echo "  [would install]     nvim config → ~/.config/nvim"
+    fi
+
+    local lazygit_src
+    lazygit_src="$(dirname "$(_script_path)")/.config/lazygit/config.yml"
+    local lazygit_conf="$HOME/.config/lazygit/config.yml"
+    if [[ -f "$lazygit_conf" ]] && diff -q "$lazygit_src" "$lazygit_conf" &>/dev/null; then
+      echo -e "  ${DIM}[up to date]${RESET}        lazygit config → ~/.config/lazygit/config.yml"
+    elif [[ -f "$lazygit_conf" ]] && ! grep -qF "managed by kdev" "$lazygit_conf"; then
+      echo "  [would back up]     lazygit config.yml → config.yml.bak"
+      echo "  [would create]      lazygit config → ~/.config/lazygit/config.yml"
+    else
+      echo "  [would create]      lazygit config → ~/.config/lazygit/config.yml"
+    fi
+
+    local skills_src
+    skills_src="$(dirname "$(_script_path)")/skills"
+    local skills_dest="$HOME/.agents/skills"
+    if [[ -d "$skills_src" ]]; then
+      local skill_count=0 skill_new=0 sdir sname
+      for sdir in "$skills_src"/*/; do
+        [[ -d "$sdir" ]] || continue
+        ((skill_count++)) || true
+        sname="$(basename "$sdir")"
+        if ! diff -rq "$sdir" "$skills_dest/$sname" &>/dev/null; then
+          ((skill_new++)) || true
+        fi
+      done
+      if [[ $skill_count -gt 0 ]]; then
+        if [[ $skill_new -eq 0 ]]; then
+          echo -e "  ${DIM}[up to date]${RESET}        $skill_count skill(s)"
+        else
+          echo "  [would install]     $skill_new/$skill_count skill(s) → ~/.agents/skills/"
+        fi
+      fi
+    else
+      echo -e "  ${DIM}[not found]${RESET}         skills/ directory"
+    fi
+
+    local ext_src
+    ext_src="$(dirname "$(_script_path)")/extensions"
+    local ext_dest="$HOME/.pi/agent/extensions"
+    if [[ -d "$ext_src" ]]; then
+      local ext_count=0 ext_new=0 edir ename
+      for edir in "$ext_src"/*/; do
+        [[ -d "$edir" ]] || continue
+        ((ext_count++)) || true
+        ename="$(basename "$edir")"
+        if ! diff -rq "$edir" "$ext_dest/$ename" &>/dev/null; then
+          ((ext_new++)) || true
+        fi
+      done
+      if [[ $ext_count -gt 0 ]]; then
+        if [[ $ext_new -eq 0 ]]; then
+          echo -e "  ${DIM}[up to date]${RESET}        $ext_count extension(s)"
+        else
+          echo "  [would install]     $ext_new/$ext_count extension(s) → ~/.pi/agent/extensions/"
+        fi
+      fi
+    else
+      echo -e "  ${DIM}[not found]${RESET}         extensions/ directory"
+    fi
+
+    if command -v pi &>/dev/null; then
+      if pi list 2>/dev/null | grep -qF "@ff-labs/pi-fff"; then
+        echo -e "  ${DIM}[installed]${RESET}         pi package: @ff-labs/pi-fff"
+      else
+        echo "  [would install]     pi package: @ff-labs/pi-fff"
+      fi
+    else
+      echo "  [would install]     pi package: @ff-labs/pi-fff (after pi)"
+    fi
+
+    local _plan_rc
+    _plan_rc="$(_shell_rc_file)"
+    if [[ -f "$_plan_rc" ]] && grep -qF "PI_FFF_MODE" "$_plan_rc"; then
+      echo -e "  ${DIM}[up to date]${RESET}        PI_FFF_MODE=override in ${_plan_rc##*/}"
+    else
+      echo "  [would add]         PI_FFF_MODE=override to ${_plan_rc##*/}"
+    fi
+
+    local agents_src
+    agents_src="$(dirname "$(_script_path)")/global-agents.md"
+    local agents_dest="$HOME/.pi/agent/AGENTS.md"
+    if [[ -f "$agents_src" ]]; then
+      if [[ -f "$agents_dest" ]] && diff -q "$agents_src" "$agents_dest" &>/dev/null; then
+        echo -e "  ${DIM}[up to date]${RESET}        global AGENTS.md"
+      else
+        echo "  [would install]     global AGENTS.md → ~/.pi/agent/AGENTS.md"
+      fi
+    else
+      echo -e "  ${DIM}[not found]${RESET}         global-agents.md"
+    fi
+
+    echo ""
+    if command -v "$SCRIPT_NAME" &>/dev/null; then
+      echo -e "  ${DIM}[in PATH]${RESET}           $SCRIPT_NAME → $(command -v "$SCRIPT_NAME")"
+    else
+      echo "  [would ask]         symlink $SCRIPT_NAME into ~/.local/bin/"
+    fi
+
+    return 0
+  fi
+
+  _check_brew
+
+  echo -e "${BOLD}Tools:${RESET}"
+  _install_brew_cask alacritty
+  _install_brew_formula tmux
+  _install_brew_formula neovim nvim
+  _install_brew_formula lazygit
+  _install_brew_formula lf
+  _install_brew_formula bat
+  _install_brew_formula git-delta delta
+  _install_brew_formula git
+  _install_brew_formula node npm
+  _install_brew_formula fzf
+  _install_brew_formula fd
+  _install_brew_formula lynx
+  _install_pi_agent
+
+  echo ""
+  echo -e "${BOLD}Configs:${RESET}"
+  _write_tmux_conf
+  _write_alacritty_conf
+  _write_lazygit_conf
+  _install_tmux_resurrect
+  local _zshrc_modified=false
+  _append_zsh_completions
+  _install_lf_config
+  _install_nvim_config
+  _install_skills
+  _install_extensions
+  _install_global_agents_md
+  _install_pi_package "@ff-labs/pi-fff"
+  _ensure_pi_fff_override
+
+  # Offer to symlink into PATH
+  echo ""
+  if command -v "$SCRIPT_NAME" &>/dev/null; then
+    dim "  [in PATH]  $SCRIPT_NAME → $(command -v "$SCRIPT_NAME")"
+  else
+    if _confirm "  Add ${BOLD}${SCRIPT_NAME}${RESET} to PATH via ~/.local/bin symlink?"; then
+      local script_real target_dir target
+      script_real="$(_script_path)"
+      target_dir="$HOME/.local/bin"
+      target="$target_dir/$SCRIPT_NAME"
+      mkdir -p "$target_dir"
+      ln -sf "$script_real" "$target"
+      info "Symlinked ${target} → ${script_real}"
+      # Check if ~/.local/bin is in PATH
+      if [[ ":$PATH:" != *":$target_dir:"* ]]; then
+        warn "~/.local/bin is not in your PATH."
+        dim "  Add to ~/.zshrc:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+      fi
+    else
+      dim "  Skipped symlink. Run manually:"
+      dim "    ln -s $(_script_path) ~/.local/bin/$SCRIPT_NAME"
+    fi
+  fi
+
+  echo ""
+  info "Setup complete."
+  dim "  Reload tmux config:  tmux source-file ~/.config/tmux/tmux.conf"
+  if [[ "$_zshrc_modified" == true ]]; then
+    dim "  ~/.zshrc was modified — run: source ~/.zshrc"
+  fi
+}
+
+# ─── Layout ───────────────────────────────────────────────────────────────────
+
+# Create the 3-pane dev layout in an existing tmux window.
+#
+# ┌──────────────────┬──────────────────┐
+# │                  │    lazygit       │
+# │    pi agent      │   (top-right)    │
+# │    (left, 50%)   ├──────────────────┤
+# │                  │    lf            │
+# │                  │  (bottom-right)  │
+# └──────────────────┴──────────────────┘
+_setup_dev_layout() {
+  local session="$1" window="$2" dir="$3"
+
+  local quoted_dir
+  printf -v quoted_dir '%q' "$dir"
+
+  local agent_cmd
+  if command -v pi &>/dev/null; then
+    agent_cmd="cd $quoted_dir && pi"
+  else
+    warn "pi-coding-agent not found — using shell. Install: npm i -g @earendil-works/pi-coding-agent"
+    agent_cmd="cd $quoted_dir"
+  fi
+
+  # Pane 1 (left): already exists — coding agent
+  local p1
+  p1="$(tmux list-panes -t "$session:$window" -F '#{pane_id}' | head -1)"
+  tmux send-keys -t "$p1" "$agent_cmd" Enter
+  tmux select-pane -t "$p1" -T "agent"
+
+  # Pane 2 (top-right): horizontal split — lazygit
+  local p2
+  p2="$(tmux split-window -t "$session:$window" -h -p 50 \
+         -c "$dir" -P -F '#{pane_id}')"
+  tmux send-keys -t "$p2" "lazygit" Enter
+  tmux select-pane -t "$p2" -T "lazygit"
+
+  # Pane 3 (bottom-right): vertical split of p2 — lf file manager
+  local p3
+  p3="$(tmux split-window -t "$p2" -v -p 50 \
+         -c "$dir" -P -F '#{pane_id}')"
+  tmux send-keys -t "$p3" "lf" Enter
+  tmux select-pane -t "$p3" -T "lf"
+
+  # Enforce proportions: 50% left, 25%/25% right — re-applied on every resize
+  tmux set-window-option -t "$session:$window" main-pane-width "50%"
+  tmux select-layout -t "$session:$window" main-vertical
+
+  # Focus the agent pane
+  tmux select-pane -t "$p1"
+}
+
+# ─── Session launcher ────────────────────────────────────────────────────────
+
+# Shared logic for dev and launch: create tmux session/window with layout,
+# or switch to it if it already exists.
+_launch_session() {
+  local repo_root="$1" name="$2" wt_dir="$3"
+
+  command -v tmux &>/dev/null || die "tmux not found. Run: ${CYAN}$SCRIPT_NAME setup${RESET}"
+
+  local session_name window_name
+  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
+  window_name="$name"
+
+  if tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux list-windows -t "$session_name" -F '#{window_name}' 2>/dev/null \
+         | grep -qx "$window_name"; then
+      info "Switching to ${BOLD}${session_name}:${window_name}${RESET}"
+    else
+      tmux new-window -t "$session_name:" -n "$window_name" -c "$wt_dir"
+      _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
+      info "Created window ${BOLD}${session_name}:${window_name}${RESET}"
+    fi
+  else
+    tmux new-session -d -s "$session_name" -n "$window_name" -c "$wt_dir" \
+         -x "${COLUMNS:-220}" -y "${LINES:-50}"
+    _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
+    info "Started session ${BOLD}${session_name}${RESET} window ${BOLD}${window_name}${RESET}"
+  fi
+
+  # Ensure kdev tmux config is active on the running server — covers servers
+  # started before `kdev setup` wrote the config.
+  local _kdev_conf="$HOME/.config/tmux/tmux.conf"
+  if [[ -f "$_kdev_conf" ]]; then
+    tmux source-file "$_kdev_conf" 2>/dev/null || true
+  fi
+
+  tmux select-window -t "$session_name:$window_name"
+  _tmux_attach_or_switch "$session_name"
+}
+
+# ─── Subcommand: dev ─────────────────────────────────────────────────────────
+
+cmd_dev() {
+  local name="" from_ref=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage_dev; exit 0 ;;
+      --from)
+        shift
+        [[ $# -eq 0 ]] && die "--from requires a ref."
+        from_ref="$1"
+        ;;
+      -*) die "Unknown option: $1." ;;
+      *)
+        [[ -n "$name" ]] && die "Too many arguments."
+        name="$1"
+        ;;
+    esac
+    shift
+  done
+
+  [[ -z "$name" ]] && die "Usage: $SCRIPT_NAME dev <name> [--from <ref>]"
+
+  if ! git check-ref-format --branch "$name" &>/dev/null; then
+    die "Invalid name: '$name'. Must be a valid git branch name."
+  fi
+
+  local repo_root
+  repo_root="$(_find_repo_root)" || die "Not inside a git repository.\n  Run this command from within a git repo."
+
+  local wt_dir="$repo_root/$WORKTREES_DIR/$name"
+
+  # Fetch and warn about stale default branch before creating new worktree
+  if [[ ! -d "$wt_dir" || ! $(_git_worktree_valid "$wt_dir" 2>/dev/null) ]] \
+     && [[ -z "$from_ref" ]]; then
+    _git_fetch_and_check "$repo_root" || return 1
+  fi
+
+  # Create worktree if it doesn't exist; repair if git link is broken
+  if [[ ! -d "$wt_dir" ]]; then
+    mkdir -p "$repo_root/$WORKTREES_DIR"
+    _ensure_gitignore "$repo_root" "$WORKTREES_DIR"
+
+    if [[ -z "$from_ref" ]]; then
+      from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"
+    fi
+
+    # Validate the from-ref
+    if [[ "$from_ref" != "HEAD" ]]; then
+      git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
+        die "Ref '$from_ref' does not exist."
+    fi
+
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
+      # Branch already exists — create worktree on existing branch
+      step "Creating worktree ${BOLD}${name}${RESET} (existing branch)..."
+      git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
+        die "Failed to create worktree. Is branch '$name' already checked out?"
+    else
+      step "Creating worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
+      git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
+        die "Failed to create worktree."
+    fi
+
+    info "Worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
+
+  elif ! _git_worktree_valid "$wt_dir"; then
+    # Directory exists but git link is broken (e.g. repo was renamed/moved).
+    # Remove the orphaned directory first so `git worktree prune` sees it gone
+    # and drops the stale registration — otherwise `worktree add` would refuse
+    # to reuse the branch that's still "checked out" in the phantom worktree.
+    warn "Worktree '${name}' has a broken git link — repairing..."
+    rm -rf "$wt_dir"
+    git -C "$repo_root" worktree prune 2>/dev/null || true
+    mkdir -p "$repo_root/$WORKTREES_DIR"
+
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
+      # Branch survived the rename — reattach to it
+      step "Re-creating worktree ${BOLD}${name}${RESET} (existing branch)..."
+      git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
+        die "Failed to recreate worktree."
+    else
+      if [[ -z "$from_ref" ]]; then
+        from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"
+      fi
+      if [[ "$from_ref" != "HEAD" ]]; then
+        git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
+          die "Ref '$from_ref' does not exist."
+      fi
+      step "Re-creating worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
+      git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
+        die "Failed to recreate worktree."
+    fi
+
+    info "Repaired worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
+
+  else
+    dim "Worktree ${name} already exists"
+  fi
+
+  _launch_session "$repo_root" "$name" "$wt_dir"
+}
+
+# ─── Subcommand: here ───────────────────────────────────────────────────────
+
+# Open dev layout in the repo root on the current branch — no worktree created,
+# no fetch. Use when you want the 3-pane layout without spinning up a worktree.
+cmd_here() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage_here; exit 0 ;;
+      -*) die "Unknown option: $1." ;;
+      *)  die "Unexpected argument: $1." ;;
+    esac
+    shift
+  done
+
+  local repo_root
+  repo_root="$(_find_repo_root)" || die "Not inside a git repository."
+
+  local branch
+  branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null \
+    || git -C "$repo_root" symbolic-ref --short HEAD 2>/dev/null)" \
+    || die "Could not determine current branch."
+
+  [[ "$branch" == "HEAD" ]] && die "Detached HEAD state — cannot use 'here'."
+
+  _launch_session "$repo_root" "$branch" "$repo_root"
+}
+
+# ─── Subcommand: launch ──────────────────────────────────────────────────────
+
+cmd_launch() {
+  local name=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage_launch; exit 0 ;;
+      -*) die "Unknown option: $1." ;;
+      *)
+        [[ -n "$name" ]] && die "Too many arguments."
+        name="$1"
+        ;;
+    esac
+    shift
+  done
+
+  [[ -z "$name" ]] && die "Usage: $SCRIPT_NAME launch <name>"
+
+  local repo_root
+  repo_root="$(_find_repo_root)" || die "Not inside a git repository."
+
+  local wt_dir="$repo_root/$WORKTREES_DIR/$name"
+  [[ ! -d "$wt_dir" ]] && die "Worktree '$name' does not exist.\n  Create it with: ${CYAN}$SCRIPT_NAME dev $name${RESET}"
+  ! _git_worktree_valid "$wt_dir" && die "Worktree '$name' has a broken git link.\n  Run ${CYAN}$SCRIPT_NAME dev $name${RESET} to repair it."
+
+  _launch_session "$repo_root" "$name" "$wt_dir"
+}
+
+# ─── Subcommand: list ────────────────────────────────────────────────────────
+
+cmd_list() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage_list; exit 0 ;;
+      -*) die "Unknown option: $1." ;;
+      *)  die "Unexpected argument: $1." ;;
+    esac
+    shift
+  done
+
+  local repo_root
+  repo_root="$(_find_repo_root)" || die "Not inside a git repository."
+
+  local wt_base="$repo_root/$WORKTREES_DIR"
+  local session_name
+  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
+
+  if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
+    echo ""
+    echo -e "  No worktrees found. Create one with: ${CYAN}$SCRIPT_NAME dev <name>${RESET}"
+    return 0
+  fi
+
+  # Gather tmux window names
+  local -a tmux_windows=()
+  if command -v tmux &>/dev/null && tmux has-session -t "$session_name" 2>/dev/null; then
+    while IFS= read -r win; do
+      tmux_windows+=("$win")
+    done < <(tmux list-windows -t "$session_name" -F '#{window_name}:#{window_active}' 2>/dev/null)
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}$(basename "$repo_root")${RESET} worktrees:  ${DIM}(session: ${session_name})${RESET}"
+  echo ""
+  printf "  ${DIM}%-20s %-20s %-10s %-10s${RESET}\n" "NAME" "BRANCH" "STATUS" "TMUX"
+  printf "  ${DIM}%-20s %-20s %-10s %-10s${RESET}\n" "────" "──────" "──────" "────"
+
+  local dir name branch status window_status
+  for dir in "$wt_base"/*/; do
+    [[ -d "$dir" ]] || continue
+    name="$(basename "$dir")"
+
+    if ! _git_worktree_valid "$dir"; then
+      printf "  %-20s %-20s %-21b %-21b\n" "$name" "?" "${RED}broken${RESET}" "${DIM}none${RESET}"
+      continue
+    fi
+
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch="?"
+
+    if _git_is_dirty "$dir"; then
+      status="${YELLOW}dirty${RESET}"
+    else
+      status="${GREEN}clean${RESET}"
+    fi
+
+    window_status="${DIM}none${RESET}"
+    local win_entry
+    for win_entry in "${tmux_windows[@]+"${tmux_windows[@]}"}"; do
+      local wn="${win_entry%%:*}" wa="${win_entry##*:}"
+      if [[ "$wn" == "$name" ]]; then
+        if [[ "$wa" == "1" ]]; then
+          window_status="${CYAN}active${RESET}"
+        else
+          window_status="open"
+        fi
+        break
+      fi
+    done
+
+    printf "  %-20s %-20s %-21b %-21b\n" "$name" "$branch" "$status" "$window_status"
+  done
+  echo ""
+}
+
+# ─── Subcommand: delete ──────────────────────────────────────────────────────
+
+cmd_delete() {
+  local name="" force=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage_delete; exit 0 ;;
+      --force|-f) force=true ;;
+      -*) die "Unknown option: $1." ;;
+      *)
+        [[ -n "$name" ]] && die "Too many arguments."
+        name="$1"
+        ;;
+    esac
+    shift
+  done
+
+  [[ -z "$name" ]] && die "Usage: $SCRIPT_NAME delete <name> [--force]"
+
+  local repo_root
+  repo_root="$(_find_repo_root)" || die "Not inside a git repository."
+
+  local wt_dir="$repo_root/$WORKTREES_DIR/$name"
+  [[ ! -d "$wt_dir" ]] && die "Worktree '$name' does not exist."
+
+  # Capture validity before any removal — used later to skip git worktree remove
+  # and to fall back to $name for branch deletion when git can't read the worktree.
+  local wt_valid=true
+  _git_worktree_valid "$wt_dir" || wt_valid=false
+
+  local session_name
+  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
+
+  # Kill tmux window if open
+  if command -v tmux &>/dev/null && tmux has-session -t "$session_name" 2>/dev/null; then
+    if tmux list-windows -t "$session_name" -F '#{window_name}' 2>/dev/null \
+         | grep -qx "$name"; then
+      if [[ "$force" != true ]]; then
+        die "tmux window '${name}' is still open.\n  Close it first, or use ${CYAN}--force${RESET}."
+      fi
+      step "Killing tmux window ${BOLD}${session_name}:${name}${RESET}..."
+      tmux kill-window -t "$session_name:$name" 2>/dev/null || true
+    fi
+  fi
+
+  # Check for uncommitted changes (only meaningful when git link is intact)
+  if [[ "$force" != true ]] && [[ "$wt_valid" == true ]] && _git_is_dirty "$wt_dir"; then
+    die "Worktree '$name' has uncommitted changes.\n  Commit or stash them, or use ${CYAN}--force${RESET}."
+  fi
+
+  local branch_name
+  branch_name="$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+  # For broken worktrees git can't read the branch; fall back to the worktree name
+  # (kdev always names the branch after the worktree, so this is safe).
+  [[ -z "${branch_name:-}" ]] && branch_name="$name"
+
+  step "Removing worktree ${BOLD}${name}${RESET}..."
+  if [[ "$wt_valid" == false ]] || [[ "$force" == true ]]; then
+    # git worktree remove requires a live git link; skip it for broken worktrees
+    git -C "$repo_root" worktree remove --force "$wt_dir" 2>/dev/null ||
+      rm -rf "$wt_dir"
+  else
+    git -C "$repo_root" worktree remove "$wt_dir"
+  fi
+
+  git -C "$repo_root" worktree prune --quiet 2>/dev/null || true
+
+  # Only delete the branch when it matches the worktree name
+  if [[ -n "${branch_name:-}" && "$branch_name" == "$name" && "$branch_name" != "HEAD" ]]; then
+    if git -C "$repo_root" branch -d "$branch_name" &>/dev/null; then
+      dim "  Deleted branch $branch_name"
+    elif [[ "$force" == true ]]; then
+      git -C "$repo_root" branch -D "$branch_name" &>/dev/null &&
+        dim "  Force-deleted branch $branch_name"
+    fi
+  fi
+
+  info "Removed ${BOLD}${name}${RESET}"
+}
+
+# ─── Usage ────────────────────────────────────────────────────────────────────
+
+usage_main() {
+  cat <<EOF
+Usage: $SCRIPT_NAME <command> [options]
+
+Commands:
+  dev <name> [--from <ref>]   Create worktree and start dev session
+  here                        Open dev session for current branch (no worktree)
+  launch <name>               Launch session for existing worktree
+  list                        List worktrees and their status
+  delete <name> [--force]     Remove a worktree
+  setup [--plan]              Install tools and write configs
+
+Options:
+  --version                Show version
+  --help                   Show this help
+  --test                   Run test suite
+  --completions <shell>    Output shell completions (bash, zsh)
+
+Running '$SCRIPT_NAME <name>' without a subcommand is the same as 'dev <name>'.
+EOF
+}
+
+usage_dev() {
+  cat <<EOF
+Usage: $SCRIPT_NAME dev <name> [--from <ref>]
+
+Create a git worktree and start a tmux dev session with 3-pane layout:
+
+  ┌──────────────────┬──────────────────┐
+  │                  │    lazygit       │
+  │    pi agent      │   (top-right)    │
+  │    (left, 50%)   ├──────────────────┤
+  │                  │    lf            │
+  │                  │  (bottom-right)  │
+  └──────────────────┴──────────────────┘
+
+The worktree is created at .worktrees/<name>/ with branch <name>.
+If the worktree already exists, just launches/attaches the session.
+The tmux session is named after the git repo.
+
+Options:
+  --from <ref>   Base ref for the new branch (default: main/master or HEAD)
+  --help         Show this help
+
+Examples:
+  $SCRIPT_NAME dev feature-auth
+  $SCRIPT_NAME dev bugfix-42 --from main
+EOF
+}
+
+usage_here() {
+  cat <<EOF
+Usage: $SCRIPT_NAME here
+
+Open a dev session for the current branch without creating a worktree.
+No git fetch — opens immediately. Uses the repo root as the working directory.
+
+Options:
+  --help   Show this help
+EOF
+}
+
+usage_launch() {
+  cat <<EOF
+Usage: $SCRIPT_NAME launch <name>
+
+Launch a tmux session for an existing worktree.
+Fails if the worktree doesn't exist — use 'dev' to create one.
+
+Options:
+  --help   Show this help
+EOF
+}
+
+usage_list() {
+  cat <<EOF
+Usage: $SCRIPT_NAME list
+
+List all worktrees in .worktrees/ with their branch, dirty status,
+and tmux window status.
+
+Options:
+  --help   Show this help
+EOF
+}
+
+usage_delete() {
+  cat <<EOF
+Usage: $SCRIPT_NAME delete <name> [--force]
+
+Remove a worktree and its branch.
+
+Options:
+  --force, -f   Force removal even with uncommitted changes or open tmux window
+  --help        Show this help
+EOF
+}
+
+usage_setup() {
+  cat <<EOF
+Usage: $SCRIPT_NAME setup [--plan]
+
+Install development tools and write configuration files.
+
+Tools installed (via Homebrew):
+  alacritty, tmux, neovim, lazygit, lf, git, node/npm
+
+Agent installed (via npm):
+  pi-coding-agent (@earendil-works/pi-coding-agent)
+
+Configs written:
+  ~/.config/alacritty/alacritty.toml           Alacritty (Option key for diacritics)
+  ~/.config/tmux/tmux.conf                    tmux configuration
+  ~/.config/tmux/plugins/tmux-resurrect/      session persistence plugin
+
+Options:
+  --plan   Dry run — show what would be done without making changes
+  --help   Show this help
+EOF
+}
+
+# ─── Tests ────────────────────────────────────────────────────────────────────
+
+cmd_test() {
+  local _T_PASSED=0 _T_FAILED=0 _T_SKIPPED=0
+  local -a _T_FAIL_DETAILS=()
+
+  _t_pass() { ((_T_PASSED++)) || true; echo -e "  ${GREEN}✓${RESET} $1"; }
+  _t_fail() { ((_T_FAILED++)) || true; echo -e "  ${RED}✗${RESET} $1"; _T_FAIL_DETAILS+=("$1"); }
+  _t_skip() { ((_T_SKIPPED++)) || true; echo -e "  ${DIM}○${RESET} $1 ${DIM}(skipped)${RESET}"; }
+
+  _t_check() {
+    local desc="$1"; shift
+    if "$@" &>/dev/null; then _t_pass "$desc"; else _t_fail "$desc"; fi
+  }
+
+  _t_check_fail() {
+    local desc="$1"; shift
+    if ! "$@" &>/dev/null; then _t_pass "$desc"; else _t_fail "$desc"; fi
+  }
+
+  _t_grep() {
+    local desc="$1" pattern="$2"; shift 2
+    local output
+    if output="$("$@" 2>&1)" && echo "$output" | grep -qE "$pattern"; then
+      _t_pass "$desc"
+    else
+      _t_fail "$desc"
+    fi
+  }
+
+  _section() { echo ""; echo -e "${BOLD}$1${RESET}"; }
+
+  echo ""
+  echo -e "${BOLD}${SCRIPT_NAME} v${VERSION} — test suite${RESET}"
+
+  local TMPBASE
+  TMPBASE="$(mktemp -d)"
+  # macOS /var → /private/var symlink; resolve so paths match git output
+  TMPBASE="$(cd "$TMPBASE" && pwd -P)"
+  # shellcheck disable=SC2064
+  trap "tmux kill-session -t dev-repo 2>/dev/null || true; tmux kill-session -t del-repo 2>/dev/null || true; tmux kill-session -t tmux-repo 2>/dev/null || true; rm -rf '${TMPBASE}'" EXIT
+
+  export KDEV_TEST_NO_ATTACH=1
+
+  # ─── G — Git helpers ─────────────────────────────────────────────────
+  _section "G — Git helpers"
+
+  local test_repo="$TMPBASE/test-repo"
+  mkdir -p "$test_repo"
+  git -C "$test_repo" init --quiet
+  git -C "$test_repo" commit --allow-empty -m "initial" --quiet
+
+  # G1: _find_repo_root from repo root
+  local g1_result
+  g1_result="$(cd "$test_repo" && _find_repo_root)"
+  if [[ "$g1_result" == "$test_repo" ]]; then
+    _t_pass "G1 _find_repo_root from repo root"
+  else
+    _t_fail "G1 _find_repo_root from repo root — got '$g1_result'"
+  fi
+
+  # G2: _git_is_dirty detects clean repo (before creating untracked files)
+  if ! _git_is_dirty "$test_repo"; then
+    _t_pass "G2 _git_is_dirty reports clean repo"
+  else
+    _t_fail "G2 _git_is_dirty reports clean repo"
+  fi
+
+  # G3: _git_is_dirty detects dirty repo
+  echo "dirty" > "$test_repo/dirty-file.txt"
+  if _git_is_dirty "$test_repo"; then
+    _t_pass "G3 _git_is_dirty reports dirty repo"
+  else
+    _t_fail "G3 _git_is_dirty reports dirty repo"
+  fi
+  rm -f "$test_repo/dirty-file.txt"
+
+  # G4: _find_repo_root from subdirectory
+  mkdir -p "$test_repo/sub/dir"
+  local g4_result
+  g4_result="$(cd "$test_repo/sub/dir" && _find_repo_root)"
+  if [[ "$g4_result" == "$test_repo" ]]; then
+    _t_pass "G4 _find_repo_root from subdirectory"
+  else
+    _t_fail "G4 _find_repo_root from subdirectory — got '$g4_result'"
+  fi
+
+  # G5: _find_repo_root from worktree
+  mkdir -p "$test_repo/$WORKTREES_DIR"
+  git -C "$test_repo" worktree add "$test_repo/$WORKTREES_DIR/test-wt" -b test-wt --quiet
+  local g5_result
+  g5_result="$(cd "$test_repo/$WORKTREES_DIR/test-wt" && _find_repo_root)"
+  if [[ "$g5_result" == "$test_repo" ]]; then
+    _t_pass "G5 _find_repo_root from worktree"
+  else
+    _t_fail "G5 _find_repo_root from worktree — got '$g5_result'"
+  fi
+
+  # G6: _find_repo_root fails outside git repo
+  if ! (cd "$TMPBASE" && _find_repo_root) &>/dev/null; then
+    _t_pass "G6 _find_repo_root fails outside git repo"
+  else
+    _t_fail "G6 _find_repo_root fails outside git repo"
+  fi
+
+  # G7: _tmux_session_name sanitizes dots and colons
+  if [[ "$(_tmux_session_name "my.project:1")" == "my_project_1" ]]; then
+    _t_pass "G7 _tmux_session_name sanitizes dots and colons"
+  else
+    _t_fail "G7 _tmux_session_name sanitizes dots and colons"
+  fi
+
+  # G8: _ensure_gitignore adds entry
+  local gi_repo="$TMPBASE/gi-repo"
+  mkdir -p "$gi_repo"
+  _ensure_gitignore "$gi_repo" ".worktrees"
+  if grep -qxF ".worktrees" "$gi_repo/.gitignore"; then
+    _t_pass "G8 _ensure_gitignore adds entry"
+  else
+    _t_fail "G8 _ensure_gitignore adds entry"
+  fi
+
+  # G9: _ensure_gitignore is idempotent
+  _ensure_gitignore "$gi_repo" ".worktrees"
+  local gi_count
+  gi_count=$(grep -cxF ".worktrees" "$gi_repo/.gitignore")
+  if [[ "$gi_count" == "1" ]]; then
+    _t_pass "G9 _ensure_gitignore is idempotent"
+  else
+    _t_fail "G9 _ensure_gitignore is idempotent — found $gi_count entries"
+  fi
+
+  # G10: _git_default_branch detects default branch
+  local default_branch
+  default_branch="$(_git_default_branch "$test_repo")" || default_branch=""
+  if [[ "$default_branch" == "main" || "$default_branch" == "master" ]]; then
+    _t_pass "G10 _git_default_branch detects default branch ($default_branch)"
+  else
+    _t_fail "G10 _git_default_branch detects default branch — got '$default_branch'"
+  fi
+
+  # Clean up test worktree
+  git -C "$test_repo" worktree remove "$test_repo/$WORKTREES_DIR/test-wt" --force 2>/dev/null || true
+
+  # ─── C — Config content ──────────────────────────────────────────────
+  _section "C — Config content"
+
+  local tmux_content
+  tmux_content="$(_tmux_conf_content)"
+
+  # C1: tmux conf includes prefix C-b
+  if echo "$tmux_content" | grep -q "prefix C-b"; then
+    _t_pass "C1 tmux conf includes prefix C-b"
+  else
+    _t_fail "C1 tmux conf includes prefix C-b"
+  fi
+
+  # C2: tmux conf includes nav mode hjkl pane navigation
+  if echo "$tmux_content" | grep -q "bind -T nav h select-pane -L"; then
+    _t_pass "C2 tmux conf includes nav mode hjkl pane navigation"
+  else
+    _t_fail "C2 tmux conf includes nav mode hjkl pane navigation"
+  fi
+
+  # C3: tmux conf includes tmux-resurrect
+  if echo "$tmux_content" | grep -q "tmux-resurrect"; then
+    _t_pass "C3 tmux conf includes tmux-resurrect"
+  else
+    _t_fail "C3 tmux conf includes tmux-resurrect"
+  fi
+
+  # C4: tmux conf includes quick-window bindings
+  if echo "$tmux_content" | grep -q 'bind g new-window'; then
+    _t_pass "C4 tmux conf includes quick-window bindings"
+  else
+    _t_fail "C4 tmux conf includes quick-window bindings"
+  fi
+
+  # C5: tmux conf includes nav mode pane swap bindings
+  if echo "$tmux_content" | grep -q "bind -T nav H swap-pane"; then
+    _t_pass "C5 tmux conf includes nav mode pane swap bindings"
+  else
+    _t_fail "C5 tmux conf includes nav mode pane swap bindings"
+  fi
+
+  # C6: tmux conf includes nav mode zoom toggle
+  if echo "$tmux_content" | grep -q "bind -T nav f resize-pane -Z"; then
+    _t_pass "C6 tmux conf includes nav mode zoom toggle binding"
+  else
+    _t_fail "C6 tmux conf includes nav mode zoom toggle binding"
+  fi
+
+  # C8: tmux conf includes C-a nav mode toggle
+  if echo "$tmux_content" | grep -q "bind -n C-a switch-client -T nav"; then
+    _t_pass "C8 tmux conf includes C-a nav mode toggle"
+  else
+    _t_fail "C8 tmux conf includes C-a nav mode toggle"
+  fi
+
+  # C9: tmux conf includes nav mode kill-pane (d)
+  if echo "$tmux_content" | grep -q "bind -T nav d kill-pane"; then
+    _t_pass "C9 tmux conf includes nav mode kill-pane binding"
+  else
+    _t_fail "C9 tmux conf includes nav mode kill-pane binding"
+  fi
+
+  # C10: tmux conf includes nav mode pi agent pane (p)
+  if echo "$tmux_content" | grep -q 'bind -T nav p split-window -v'; then
+    _t_pass "C10 tmux conf includes nav mode pi agent pane binding"
+  else
+    _t_fail "C10 tmux conf includes nav mode pi agent pane binding"
+  fi
+
+  # C12: tmux conf includes nav mode terminal pane (t)
+  if echo "$tmux_content" | grep -q 'bind -T nav t split-window -v'; then
+    _t_pass "C12 tmux conf includes nav mode terminal pane binding"
+  else
+    _t_fail "C12 tmux conf includes nav mode terminal pane binding"
+  fi
+
+  # C11: tmux conf includes NAV indicator in status bar
+  if echo "$tmux_content" | grep -q 'NAV'; then
+    _t_pass "C11 tmux conf includes NAV indicator in status bar"
+  else
+    _t_fail "C11 tmux conf includes NAV indicator in status bar"
+  fi
+
+  # C7: alacritty conf includes option_as_alt
+  local alacritty_content
+  alacritty_content="$(_alacritty_conf_content)"
+  if echo "$alacritty_content" | grep -q 'option_as_alt.*OnlyLeft'; then
+    _t_pass "C7 alacritty conf sets option_as_alt = OnlyLeft"
+  else
+    _t_fail "C7 alacritty conf sets option_as_alt = OnlyLeft"
+  fi
+
+  # ─── D — Dev command ──────────────────────────────────────────────────
+  _section "D — Dev command"
+
+  local dev_repo="$TMPBASE/dev-repo"
+  mkdir -p "$dev_repo"
+  git -C "$dev_repo" init --quiet
+  git -C "$dev_repo" commit --allow-empty -m "initial" --quiet
+
+  # D1: dev creates worktree
+  (cd "$dev_repo" && cmd_dev "test-feature") &>/dev/null
+  if [[ -d "$dev_repo/$WORKTREES_DIR/test-feature" ]]; then
+    _t_pass "D1 dev creates worktree in $WORKTREES_DIR/"
+  else
+    _t_fail "D1 dev creates worktree in $WORKTREES_DIR/"
+  fi
+
+  # D2: dev creates correct branch
+  local wt_branch
+  wt_branch="$(git -C "$dev_repo/$WORKTREES_DIR/test-feature" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [[ "$wt_branch" == "test-feature" ]]; then
+    _t_pass "D2 dev creates correct branch"
+  else
+    _t_fail "D2 dev creates correct branch — got '$wt_branch'"
+  fi
+
+  # D3: dev with existing worktree succeeds (re-launch)
+  if (cd "$dev_repo" && cmd_dev "test-feature") &>/dev/null; then
+    _t_pass "D3 dev with existing worktree succeeds (re-launch)"
+  else
+    _t_fail "D3 dev with existing worktree succeeds (re-launch)"
+  fi
+
+  # D4: dev adds .worktrees to .gitignore
+  if grep -qxF "$WORKTREES_DIR" "$dev_repo/.gitignore" 2>/dev/null; then
+    _t_pass "D4 dev adds $WORKTREES_DIR to .gitignore"
+  else
+    _t_fail "D4 dev adds $WORKTREES_DIR to .gitignore"
+  fi
+
+  # D5: dev fails without name
+  if ! (cd "$dev_repo" && cmd_dev) &>/dev/null; then
+    _t_pass "D5 dev fails without name argument"
+  else
+    _t_fail "D5 dev fails without name argument"
+  fi
+
+  # D6: dev fails outside git repo
+  local no_git_dir="$TMPBASE/no-git"
+  mkdir -p "$no_git_dir"
+  if ! (cd "$no_git_dir" && cmd_dev "test") &>/dev/null; then
+    _t_pass "D6 dev fails outside git repo"
+  else
+    _t_fail "D6 dev fails outside git repo"
+  fi
+
+  # D7: dev --from creates worktree at specific ref
+  git -C "$dev_repo" tag v-test-from
+  (cd "$dev_repo" && cmd_dev "from-tag" --from v-test-from) &>/dev/null
+  if [[ -d "$dev_repo/$WORKTREES_DIR/from-tag" ]]; then
+    _t_pass "D7 dev --from creates worktree at specific ref"
+  else
+    _t_fail "D7 dev --from creates worktree at specific ref"
+  fi
+
+  # D8: dev rejects invalid branch name
+  if ! (cd "$dev_repo" && cmd_dev "bad..name") &>/dev/null; then
+    _t_pass "D8 dev rejects invalid branch name"
+  else
+    _t_fail "D8 dev rejects invalid branch name"
+  fi
+
+  # D9: dev --from with bad ref fails
+  if ! (cd "$dev_repo" && cmd_dev "bad-ref-wt" --from "nonexistent-ref-xyz") &>/dev/null; then
+    _t_pass "D9 dev --from with bad ref fails"
+  else
+    _t_fail "D9 dev --from with bad ref fails"
+  fi
+
+  # D10: dev auto-repairs broken worktree (branch survives)
+  (cd "$dev_repo" && cmd_dev "repair-wt") &>/dev/null
+  echo "gitdir: /nonexistent/path/.git/worktrees/repair-wt" \
+    > "$dev_repo/$WORKTREES_DIR/repair-wt/.git"
+  if (cd "$dev_repo" && cmd_dev "repair-wt") &>/dev/null \
+     && _git_worktree_valid "$dev_repo/$WORKTREES_DIR/repair-wt"; then
+    _t_pass "D10 dev auto-repairs broken worktree"
+  else
+    _t_fail "D10 dev auto-repairs broken worktree"
+  fi
+
+  # D11: repaired worktree is on the correct branch
+  local d11_branch
+  d11_branch="$(git -C "$dev_repo/$WORKTREES_DIR/repair-wt" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [[ "$d11_branch" == "repair-wt" ]]; then
+    _t_pass "D11 repaired worktree is on the correct branch"
+  else
+    _t_fail "D11 repaired worktree is on the correct branch — got '$d11_branch'"
+  fi
+
+  # D12: _git_fetch_and_check warns when local branch is behind remote
+  local d12_remote="$TMPBASE/d12-remote"
+  local d12_local="$TMPBASE/d12-local"
+  git init --bare "$d12_remote" --quiet
+  git clone "$d12_remote" "$d12_local" --quiet 2>/dev/null
+  (cd "$d12_local" && git commit --allow-empty -m "c1" --quiet && git push --quiet 2>/dev/null)
+  # Advance remote past local
+  local d12_clone2="$TMPBASE/d12-clone2"
+  git clone "$d12_remote" "$d12_clone2" --quiet 2>/dev/null
+  (cd "$d12_clone2" && git commit --allow-empty -m "c2" --quiet && git push --quiet 2>/dev/null)
+  local d12_output
+  d12_output="$(_git_fetch_and_check "$d12_local" 2>&1 </dev/null)" || true
+  if echo "$d12_output" | grep -q "behind"; then
+    _t_pass "D12 _git_fetch_and_check warns when behind remote"
+  else
+    _t_fail "D12 _git_fetch_and_check warns when behind remote"
+  fi
+
+  # D13: _git_fetch_and_check silent when up to date
+  local d13_repo="$TMPBASE/d13-repo"
+  local d13_remote="$TMPBASE/d13-remote"
+  git init --bare "$d13_remote" --quiet
+  git clone "$d13_remote" "$d13_repo" --quiet 2>/dev/null
+  (cd "$d13_repo" && git commit --allow-empty -m "c1" --quiet && git push --quiet 2>/dev/null)
+  local d13_output
+  d13_output="$(_git_fetch_and_check "$d13_repo" 2>&1)"
+  if echo "$d13_output" | grep -q "behind"; then
+    _t_fail "D13 _git_fetch_and_check silent when up to date"
+  else
+    _t_pass "D13 _git_fetch_and_check silent when up to date"
+  fi
+
+  # D14: _git_fetch_and_check skips when no remote
+  local d14_repo="$TMPBASE/d14-repo"
+  mkdir -p "$d14_repo"
+  git -C "$d14_repo" init --quiet
+  git -C "$d14_repo" commit --allow-empty -m "c1" --quiet
+  if _git_fetch_and_check "$d14_repo" 2>/dev/null; then
+    _t_pass "D14 _git_fetch_and_check skips when no remote"
+  else
+    _t_fail "D14 _git_fetch_and_check skips when no remote"
+  fi
+
+  # Clean up dev-repo tmux session
+  tmux kill-session -t dev-repo 2>/dev/null || true
+
+  # ─── L — List command ─────────────────────────────────────────────────
+  _section "L — List command"
+
+  # L1: list shows worktrees
+  local list_output
+  list_output="$(cd "$dev_repo" && cmd_list 2>&1)"
+  if echo "$list_output" | grep -q "test-feature"; then
+    _t_pass "L1 list shows created worktrees"
+  else
+    _t_fail "L1 list shows created worktrees"
+  fi
+
+  # L2: list shows multiple worktrees
+  if echo "$list_output" | grep -q "from-tag"; then
+    _t_pass "L2 list shows multiple worktrees"
+  else
+    _t_fail "L2 list shows multiple worktrees"
+  fi
+
+  # L3: list fails outside git repo
+  if ! (cd "$no_git_dir" && cmd_list) &>/dev/null; then
+    _t_pass "L3 list fails outside git repo"
+  else
+    _t_fail "L3 list fails outside git repo"
+  fi
+
+  # L4: list with no worktrees shows helpful message
+  local empty_repo="$TMPBASE/empty-repo"
+  mkdir -p "$empty_repo"
+  git -C "$empty_repo" init --quiet
+  git -C "$empty_repo" commit --allow-empty -m "initial" --quiet
+  local l4_output
+  l4_output="$(cd "$empty_repo" && cmd_list 2>&1)"
+  if echo "$l4_output" | grep -q "No worktrees found"; then
+    _t_pass "L4 list with no worktrees shows helpful message"
+  else
+    _t_fail "L4 list with no worktrees shows helpful message"
+  fi
+
+  # L5: list shows 'broken' for a worktree with a broken git link
+  (cd "$dev_repo" && cmd_dev "list-broken-wt") &>/dev/null
+  echo "gitdir: /nonexistent/path/.git/worktrees/list-broken-wt" \
+    > "$dev_repo/$WORKTREES_DIR/list-broken-wt/.git"
+  local l5_output
+  l5_output="$(cd "$dev_repo" && cmd_list 2>&1)"
+  if echo "$l5_output" | grep -q "broken"; then
+    _t_pass "L5 list shows broken status for invalid worktree"
+  else
+    _t_fail "L5 list shows broken status for invalid worktree"
+  fi
+
+  # ─── X — Delete command ──────────────────────────────────────────────
+  _section "X — Delete command"
+
+  local del_repo="$TMPBASE/del-repo"
+  mkdir -p "$del_repo"
+  git -C "$del_repo" init --quiet
+  git -C "$del_repo" commit --allow-empty -m "initial" --quiet
+
+  # Create a worktree to delete
+  (cd "$del_repo" && cmd_dev "to-delete") &>/dev/null
+  tmux kill-session -t del-repo 2>/dev/null || true
+
+  # X1: delete removes worktree directory
+  (cd "$del_repo" && cmd_delete "to-delete") &>/dev/null
+  if [[ ! -d "$del_repo/$WORKTREES_DIR/to-delete" ]]; then
+    _t_pass "X1 delete removes worktree directory"
+  else
+    _t_fail "X1 delete removes worktree directory"
+  fi
+
+  # X2: delete removes branch
+  if ! git -C "$del_repo" show-ref --verify --quiet "refs/heads/to-delete"; then
+    _t_pass "X2 delete removes branch"
+  else
+    _t_fail "X2 delete removes branch"
+  fi
+
+  # X3: delete fails on non-existent worktree
+  if ! (cd "$del_repo" && cmd_delete "nonexistent") &>/dev/null; then
+    _t_pass "X3 delete fails on non-existent worktree"
+  else
+    _t_fail "X3 delete fails on non-existent worktree"
+  fi
+
+  # X4: delete --force removes dirty worktree
+  (cd "$del_repo" && cmd_dev "dirty-wt") &>/dev/null
+  tmux kill-session -t del-repo 2>/dev/null || true
+  echo "dirty" > "$del_repo/$WORKTREES_DIR/dirty-wt/dirty-file.txt"
+  if (cd "$del_repo" && cmd_delete "dirty-wt" --force) &>/dev/null; then
+    _t_pass "X4 delete --force removes dirty worktree"
+  else
+    _t_fail "X4 delete --force removes dirty worktree"
+  fi
+
+  # X5: delete without --force fails on dirty worktree
+  (cd "$del_repo" && cmd_dev "dirty-wt2") &>/dev/null
+  tmux kill-session -t del-repo 2>/dev/null || true
+  echo "dirty" > "$del_repo/$WORKTREES_DIR/dirty-wt2/dirty-file.txt"
+  if ! (cd "$del_repo" && cmd_delete "dirty-wt2") &>/dev/null; then
+    _t_pass "X5 delete without --force fails on dirty worktree"
+  else
+    _t_fail "X5 delete without --force fails on dirty worktree"
+  fi
+
+  # Clean up remaining del-repo worktrees
+  git -C "$del_repo" worktree remove "$del_repo/$WORKTREES_DIR/dirty-wt2" --force 2>/dev/null || true
+
+  # X6: delete removes a worktree with a broken git link (no --force needed)
+  (cd "$del_repo" && cmd_dev "broken-del-wt") &>/dev/null
+  tmux kill-session -t del-repo 2>/dev/null || true
+  echo "gitdir: /nonexistent/path/.git/worktrees/broken-del-wt" \
+    > "$del_repo/$WORKTREES_DIR/broken-del-wt/.git"
+  if (cd "$del_repo" && cmd_delete "broken-del-wt") &>/dev/null \
+     && [[ ! -d "$del_repo/$WORKTREES_DIR/broken-del-wt" ]]; then
+    _t_pass "X6 delete removes broken worktree without --force"
+  else
+    _t_fail "X6 delete removes broken worktree without --force"
+  fi
+
+  # ─── T — tmux layout ─────────────────────────────────────────────────
+  if command -v tmux &>/dev/null; then
+    _section "T — tmux layout"
+
+    local tmux_repo="$TMPBASE/tmux-repo"
+    mkdir -p "$tmux_repo"
+    git -C "$tmux_repo" init --quiet
+    git -C "$tmux_repo" commit --allow-empty -m "initial" --quiet
+
+    (cd "$tmux_repo" && cmd_dev "tmux-test") &>/dev/null
+
+    local tmux_session
+    tmux_session="$(_tmux_session_name "tmux-repo")"
+
+    # T1: dev creates tmux session
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+      _t_pass "T1 dev creates tmux session"
+    else
+      _t_fail "T1 dev creates tmux session"
+    fi
+
+    # T2: session has 3 panes
+    local pane_count
+    pane_count="$(tmux list-panes -t "$tmux_session:tmux-test" -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$pane_count" == "3" ]]; then
+      _t_pass "T2 session has 3 panes"
+    else
+      _t_fail "T2 session has 3 panes — got $pane_count"
+    fi
+
+    # T3: window named correctly
+    local window_names
+    window_names="$(tmux list-windows -t "$tmux_session" -F '#{window_name}' 2>/dev/null)"
+    if echo "$window_names" | grep -qx "tmux-test"; then
+      _t_pass "T3 window named correctly"
+    else
+      _t_fail "T3 window named correctly — got '$window_names'"
+    fi
+
+    # T4: second dev call reuses existing window
+    (cd "$tmux_repo" && cmd_dev "tmux-test") &>/dev/null
+    local window_count
+    window_count="$(tmux list-windows -t "$tmux_session" -F '#{window_name}' 2>/dev/null | wc -l | tr -d ' ')"
+    if [[ "$window_count" == "1" ]]; then
+      _t_pass "T4 second dev call reuses existing window"
+    else
+      _t_fail "T4 second dev call reuses existing window — got $window_count windows"
+    fi
+
+    # T5: launch command works for existing worktree
+    if (cd "$tmux_repo" && cmd_launch "tmux-test") &>/dev/null; then
+      _t_pass "T5 launch works for existing worktree"
+    else
+      _t_fail "T5 launch works for existing worktree"
+    fi
+
+    # T6: launch fails for non-existent worktree
+    if ! (cd "$tmux_repo" && cmd_launch "nonexistent") &>/dev/null; then
+      _t_pass "T6 launch fails for non-existent worktree"
+    else
+      _t_fail "T6 launch fails for non-existent worktree"
+    fi
+
+    # T7: launch sources kdev tmux config (prefix restored to C-b)
+    local t7_conf="$HOME/.config/tmux/tmux.conf"
+    local t7_backup=""
+    if [[ -f "$t7_conf" ]]; then
+      t7_backup="${t7_conf}.t7bak"
+      cp "$t7_conf" "$t7_backup"
+    fi
+    mkdir -p "$(dirname "$t7_conf")"
+    _tmux_conf_content > "$t7_conf"
+    tmux set-option -g prefix C-a 2>/dev/null
+    (cd "$tmux_repo" && cmd_dev "tmux-test") &>/dev/null
+    local t7_prefix
+    t7_prefix="$(tmux show-option -g prefix 2>/dev/null | awk '{print $2}')"
+    if [[ "$t7_prefix" == "C-b" ]]; then
+      _t_pass "T7 launch sources kdev tmux config"
+    else
+      _t_fail "T7 launch sources kdev tmux config — prefix is '$t7_prefix'"
+    fi
+    if [[ -n "${t7_backup:-}" ]]; then
+      mv "$t7_backup" "$t7_conf"
+    fi
+
+    tmux kill-session -t "$tmux_session" 2>/dev/null || true
+  else
+    _section "T — tmux layout (skipped — tmux not installed)"
+    _t_skip "T1 dev creates tmux session"
+    _t_skip "T2 session has 3 panes"
+    _t_skip "T3 window named correctly"
+    _t_skip "T4 second dev call reuses existing window"
+    _t_skip "T5 launch works for existing worktree"
+    _t_skip "T6 launch fails for non-existent worktree"
+    _t_skip "T7 launch sources kdev tmux config"
+  fi
+
+  # ─── S — Setup ───────────────────────────────────────────────────────
+  _section "S — Setup"
+
+  _t_grep "S1 setup --plan lists tools" "Tools:" cmd_setup --plan
+  _t_grep "S2 setup --plan lists configs" "Configs:" cmd_setup --plan
+  _t_grep "S3 setup --plan is non-destructive" "installed|would" cmd_setup --plan
+  _t_grep "S4 setup --plan mentions zsh completions" "zshrc" cmd_setup --plan
+  _t_grep "S5 setup --plan mentions lf config" "lf config" cmd_setup --plan
+  _t_grep "S6 setup --plan mentions alacritty config" "alacritty" cmd_setup --plan
+  _t_grep "S7 setup --plan mentions skills" "skill" cmd_setup --plan
+
+  # S8: _install_skills copies skills to ~/.agents/skills/
+  local s8_dest="$TMPBASE/s8_home/.agents/skills"
+  (
+    export HOME="$TMPBASE/s8_home"
+    _install_skills
+  ) &>/dev/null
+  local s8_ok=true
+  local s8_skill
+  for s8_skill in ck cqs caveman monk; do
+    if [[ ! -f "$s8_dest/$s8_skill/SKILL.md" ]]; then
+      s8_ok=false
+      break
+    fi
+  done
+  if $s8_ok; then
+    _t_pass "S8 _install_skills copies skills to ~/.agents/skills/"
+  else
+    _t_fail "S8 _install_skills copies skills to ~/.agents/skills/"
+  fi
+
+  # S9: _install_skills is idempotent (re-run succeeds)
+  if (
+    export HOME="$TMPBASE/s8_home"
+    _install_skills
+  ) &>/dev/null; then
+    _t_pass "S9 _install_skills is idempotent"
+  else
+    _t_fail "S9 _install_skills is idempotent"
+  fi
+
+  # S10: setup --plan mentions global AGENTS.md
+  _t_grep "S10 setup --plan mentions global AGENTS.md" "global AGENTS.md" cmd_setup --plan
+
+  # S11: _install_global_agents_md copies to ~/.pi/agent/AGENTS.md
+  mkdir -p "$TMPBASE/s11_home"
+  (
+    export HOME="$TMPBASE/s11_home"
+    _install_global_agents_md
+  ) &>/dev/null
+  if [[ -f "$TMPBASE/s11_home/.pi/agent/AGENTS.md" ]]; then
+    _t_pass "S11 _install_global_agents_md copies to ~/.pi/agent/AGENTS.md"
+  else
+    _t_fail "S11 _install_global_agents_md copies to ~/.pi/agent/AGENTS.md"
+  fi
+
+  # S12: _install_global_agents_md is idempotent
+  if (
+    export HOME="$TMPBASE/s11_home"
+    _install_global_agents_md
+  ) &>/dev/null; then
+    _t_pass "S12 _install_global_agents_md is idempotent"
+  else
+    _t_fail "S12 _install_global_agents_md is idempotent"
+  fi
+
+  # S13: setup --plan mentions lazygit config
+  _t_grep "S13 setup --plan mentions lazygit config" "lazygit config" cmd_setup --plan
+
+  # S14: _write_lazygit_conf creates config with delta pager and vim editor
+  mkdir -p "$TMPBASE/s14_home/.config/lazygit"
+  (
+    export HOME="$TMPBASE/s14_home"
+    _write_lazygit_conf
+  ) &>/dev/null
+  if grep -qF "delta" "$TMPBASE/s14_home/.config/lazygit/config.yml" 2>/dev/null && \
+     grep -qF "editCommand" "$TMPBASE/s14_home/.config/lazygit/config.yml" 2>/dev/null; then
+    _t_pass "S14 _write_lazygit_conf creates config with delta pager and vim editor"
+  else
+    _t_fail "S14 _write_lazygit_conf creates config with delta pager and vim editor"
+  fi
+
+  # S15: _write_lazygit_conf is idempotent
+  if (
+    export HOME="$TMPBASE/s14_home"
+    _write_lazygit_conf
+  ) &>/dev/null; then
+    _t_pass "S15 _write_lazygit_conf is idempotent"
+  else
+    _t_fail "S15 _write_lazygit_conf is idempotent"
+  fi
+
+  # S15b: _write_lazygit_conf sets suspendOnEdit
+  if grep -qF "suspendOnEdit" "$TMPBASE/s14_home/.config/lazygit/config.yml" 2>/dev/null; then
+    _t_pass "S15b _write_lazygit_conf sets suspendOnEdit"
+  else
+    _t_fail "S15b _write_lazygit_conf sets suspendOnEdit"
+  fi
+
+  # S16: _install_extensions copies extensions to ~/.pi/agent/extensions/
+  if (
+    export HOME="$TMPBASE/s16_home"
+    mkdir -p "$HOME"
+    _install_extensions
+    [[ -f "$HOME/.pi/agent/extensions/ck-pi-extension/index.ts" ]]
+  ) &>/dev/null; then
+    _t_pass "S16 _install_extensions copies extensions to ~/.pi/agent/extensions/"
+  else
+    _t_fail "S16 _install_extensions copies extensions to ~/.pi/agent/extensions/"
+  fi
+
+  # S17: _install_extensions is idempotent (re-run succeeds)
+  if (
+    export HOME="$TMPBASE/s16_home"
+    _install_extensions
+  ) &>/dev/null; then
+    _t_pass "S17 _install_extensions is idempotent"
+  else
+    _t_fail "S17 _install_extensions is idempotent"
+  fi
+
+  # S18: setup --plan mentions extensions
+  _t_grep "S18 setup --plan mentions extensions" "extension" cmd_setup --plan
+
+  # S19: _ensure_pi_fff_override adds PI_FFF_MODE to shell rc
+  if (
+    export HOME="$TMPBASE/s19_home"
+    export SHELL="/bin/zsh"
+    mkdir -p "$HOME"
+    touch "$HOME/.zshrc"
+    _ensure_pi_fff_override
+    grep -qF "PI_FFF_MODE=override" "$HOME/.zshrc"
+  ) &>/dev/null; then
+    _t_pass "S19 _ensure_pi_fff_override adds PI_FFF_MODE to shell rc"
+  else
+    _t_fail "S19 _ensure_pi_fff_override adds PI_FFF_MODE to shell rc"
+  fi
+
+  # S20: _ensure_pi_fff_override is idempotent
+  if (
+    export HOME="$TMPBASE/s19_home"
+    export SHELL="/bin/zsh"
+    _ensure_pi_fff_override
+    [[ $(grep -c "PI_FFF_MODE" "$HOME/.zshrc") -eq 1 ]]
+  ) &>/dev/null; then
+    _t_pass "S20 _ensure_pi_fff_override is idempotent"
+  else
+    _t_fail "S20 _ensure_pi_fff_override is idempotent"
+  fi
+
+  # S21: _shell_rc_file detects bash
+  if (
+    export SHELL="/bin/bash"
+    export HOME="$TMPBASE/s21_home"
+    mkdir -p "$HOME"
+    touch "$HOME/.bashrc"
+    [[ "$(_shell_rc_file)" == *bashrc* || "$(_shell_rc_file)" == *bash_profile* ]]
+  ) &>/dev/null; then
+    _t_pass "S21 _shell_rc_file detects bash"
+  else
+    _t_fail "S21 _shell_rc_file detects bash"
+  fi
+
+  # S22: setup --plan mentions PI_FFF_MODE
+  _t_grep "S22 setup --plan mentions PI_FFF_MODE" "PI_FFF_MODE" cmd_setup --plan
+
+  # S23: _write_tmux_conf is idempotent — second run says up to date
+  _t_grep "S23 _write_tmux_conf says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s23_home'; mkdir -p \"\$HOME/.config/tmux\"; source '$0'; _write_tmux_conf; _write_tmux_conf"
+
+  # S24: _install_lf_config is idempotent — second run says up to date
+  _t_grep "S24 _install_lf_config says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s24_home'; mkdir -p \"\$HOME\"; source '$0'; _install_lf_config; _install_lf_config"
+
+  # S25: _install_global_agents_md is idempotent — second run says up to date
+  _t_grep "S25 _install_global_agents_md says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s25_home'; mkdir -p \"\$HOME\"; source '$0'; _install_global_agents_md; _install_global_agents_md"
+
+  # S26: setup --plan says up to date for tmux.conf after write
+  local s26_home="$TMPBASE/s26_home"
+  mkdir -p "$s26_home"
+  ( export HOME="$s26_home"; _write_tmux_conf ) &>/dev/null
+  local s26_out
+  s26_out="$( export HOME="$s26_home"; cmd_setup --plan 2>/dev/null )"
+  if echo "$s26_out" | grep -q "up to date.*tmux"; then
+    _t_pass "S26 setup --plan shows up to date for tmux.conf after write"
+  else
+    _t_fail "S26 setup --plan shows up to date for tmux.conf after write"
+  fi
+
+  # S27: _install_skills is idempotent — second run says up to date
+  _t_grep "S27 _install_skills says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s27_home'; mkdir -p \"\$HOME\"; source '$0'; _install_skills; _install_skills"
+
+  # S28: _install_extensions is idempotent — second run says up to date
+  _t_grep "S28 _install_extensions says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s28_home'; mkdir -p \"\$HOME\"; source '$0'; _install_extensions; _install_extensions"
+
+  # S29: setup --plan mentions fzf
+  _t_grep "S29 setup --plan mentions fzf" "fzf" cmd_setup --plan
+
+  # S30: setup --plan mentions fd
+  _t_grep "S30 setup --plan mentions fd" "fd" cmd_setup --plan
+
+  # S35: setup --plan mentions lynx
+  _t_grep "S35 setup --plan mentions lynx" "lynx" cmd_setup --plan
+
+  # S31: setup --plan mentions nvim config
+  _t_grep "S31 setup --plan mentions nvim config" "nvim config" cmd_setup --plan
+
+  # S32: _install_nvim_config copies nvim config
+  mkdir -p "$TMPBASE/s32_home"
+  (
+    export HOME="$TMPBASE/s32_home"
+    _install_nvim_config
+  ) &>/dev/null
+  if [[ -f "$TMPBASE/s32_home/.config/nvim/init.lua" ]] && \
+     [[ -f "$TMPBASE/s32_home/.config/nvim/lua/plugins/fzf.lua" ]]; then
+    _t_pass "S32 _install_nvim_config copies nvim config"
+  else
+    _t_fail "S32 _install_nvim_config copies nvim config"
+  fi
+
+  # S33: _install_nvim_config is idempotent
+  if (
+    export HOME="$TMPBASE/s32_home"
+    _install_nvim_config
+  ) &>/dev/null; then
+    _t_pass "S33 _install_nvim_config is idempotent"
+  else
+    _t_fail "S33 _install_nvim_config is idempotent"
+  fi
+
+  # S34: _install_nvim_config says up to date on second run
+  _t_grep "S34 _install_nvim_config says up to date on second run" "up to date" \
+    bash -c "export HOME='$TMPBASE/s34_home'; mkdir -p \"\$HOME\"; source '$0'; _install_nvim_config; _install_nvim_config"
+
+  # ─── V — Meta ────────────────────────────────────────────────────────
+  _section "H — Here command"
+
+  local here_repo="$TMPBASE/here-repo"
+  mkdir -p "$here_repo"
+  git -C "$here_repo" init --quiet
+  git -C "$here_repo" commit --allow-empty -m "initial" --quiet
+
+  # H1: here --help shows usage
+  _t_grep "H1 here --help shows usage" "Usage:" main here --help
+
+  # H2: here fails outside git repo
+  local here_no_git="$TMPBASE/here-no-git"
+  mkdir -p "$here_no_git"
+  if ! (cd "$here_no_git" && cmd_here) &>/dev/null; then
+    _t_pass "H2 here fails outside git repo"
+  else
+    _t_fail "H2 here fails outside git repo"
+  fi
+
+  # H3: here fails in detached HEAD
+  local detached_repo="$TMPBASE/here-detached"
+  mkdir -p "$detached_repo"
+  git -C "$detached_repo" init --quiet
+  git -C "$detached_repo" commit --allow-empty -m "initial" --quiet
+  git -C "$detached_repo" checkout --detach HEAD --quiet 2>/dev/null
+  if ! (cd "$detached_repo" && cmd_here) &>/dev/null; then
+    _t_pass "H3 here fails in detached HEAD"
+  else
+    _t_fail "H3 here fails in detached HEAD"
+  fi
+
+  # H5: here resolves branch on empty repo (no commits)
+  local empty_repo="$TMPBASE/here-empty"
+  mkdir -p "$empty_repo"
+  git -C "$empty_repo" init --quiet
+  local h5_branch
+  h5_branch="$(git -C "$empty_repo" symbolic-ref --short HEAD 2>/dev/null)"
+  if [[ -n "$h5_branch" ]]; then
+    _t_pass "H5 here resolves branch on empty repo"
+  else
+    _t_fail "H5 here resolves branch on empty repo"
+  fi
+
+  # H4: here succeeds in a git repo (tmux required)
+  if command -v tmux &>/dev/null; then
+    if (cd "$here_repo" && cmd_here) &>/dev/null; then
+      _t_pass "H4 here succeeds in git repo"
+    else
+      _t_fail "H4 here succeeds in git repo"
+    fi
+  else
+    _t_skip "H4 here succeeds in git repo (tmux not installed)"
+  fi
+
+  _section "V — Meta"
+
+  _t_grep "V1 --version shows version" "$VERSION" main --version
+  _t_grep "V2 --help shows usage" "Usage:" main --help
+
+  # V3: version is valid semver
+  if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    _t_pass "V3 version is valid semver"
+  else
+    _t_fail "V3 version is valid semver — got '$VERSION'"
+  fi
+
+  # V4: unknown option fails
+  if ! (main "--totally-fake-option") &>/dev/null; then
+    _t_pass "V4 unknown option fails"
+  else
+    _t_fail "V4 unknown option fails"
+  fi
+
+  _t_grep "V5 --completions zsh outputs compdef"  "compdef _kdev kdev"  main --completions zsh
+  _t_grep "V6 --completions bash outputs complete" "complete -F _kdev kdev" main --completions bash
+
+  # ─── Summary ──────────────────────────────────────────────────────────
+  echo ""
+  echo -e "─────────────────────────────────────"
+  local total=$((_T_PASSED + _T_FAILED + _T_SKIPPED))
+
+  if [[ $_T_FAILED -eq 0 ]]; then
+    echo -e "${GREEN}All ${total} tests passed${RESET} (${_T_SKIPPED} skipped)"
+  else
+    echo -e "${RED}${_T_FAILED} failed${RESET}, ${GREEN}${_T_PASSED} passed${RESET}, ${_T_SKIPPED} skipped"
+    echo ""
+    echo -e "${RED}Failures:${RESET}"
+    local detail
+    for detail in "${_T_FAIL_DETAILS[@]}"; do
+      echo -e "  ${RED}✗${RESET} $detail"
+    done
+  fi
+  echo ""
+
+  unset KDEV_TEST_NO_ATTACH
+  [[ $_T_FAILED -eq 0 ]]
+}
+
+# ─── Main dispatch ────────────────────────────────────────────────────────────
+
+main() {
+  case "${1:-}" in
+    dev)        shift; cmd_dev "$@" ;;
+    here)       shift; cmd_here "$@" ;;
+    launch)     shift; cmd_launch "$@" ;;
+    list)       shift; cmd_list "$@" ;;
+    delete)     shift; cmd_delete "$@" ;;
+    setup)      shift; cmd_setup "$@" ;;
+    --completions)
+      shift
+      case "${1:-}" in
+        zsh)  _completions_zsh ;;
+        bash) _completions_bash ;;
+        "")   die "Usage: $SCRIPT_NAME --completions <bash|zsh>" ;;
+        *)    die "Unknown shell: $1. Supported: bash, zsh" ;;
+      esac
+      ;;
+    --version)  echo "$SCRIPT_NAME $VERSION" ;;
+    --help|-h)  usage_main ;;
+    --test)     cmd_test ;;
+    "")         usage_main ;;
+    -*)         die "Unknown option: $1.\n  Run ${CYAN}$SCRIPT_NAME --help${RESET} for usage." ;;
+    *)          cmd_dev "$@" ;;
+  esac
+}
+
+main "$@"

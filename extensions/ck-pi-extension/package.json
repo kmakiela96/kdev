@@ -1,0 +1,9 @@
+{
+  "name": "ck-pi-extension",
+  "version": "0.1.0",
+  "description": "Pi extension wrapping ck semantic code search CLI",
+  "keywords": ["pi-package", "pi-extension", "ck", "code-search", "semantic-search"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
