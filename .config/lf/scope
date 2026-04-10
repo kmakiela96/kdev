@@ -1,0 +1,36 @@
+#!/bin/sh
+# File preview handler for lf — macOS
+# managed by kdev
+
+set -C -f
+IFS="$(printf '%b_' '\n')"; IFS="${IFS%_}"
+
+case "$(file --dereference --brief --mime-type -- "$1")" in
+    text/html)
+        command -v lynx >/dev/null 2>&1 \
+            && lynx -width="$4" -display_charset=utf-8 -dump "$1" \
+            || cat "$1"
+        ;;
+    text/troff)
+        man ./ "$1" | col -b
+        ;;
+    text/* | */xml | application/json | application/x-ndjson)
+        command -v bat >/dev/null 2>&1 \
+            && bat -p --theme ansi --terminal-width "$(($4-2))" -f "$1" \
+            || cat "$1"
+        ;;
+    audio/* | video/*)
+        command -v mediainfo >/dev/null 2>&1 && mediainfo "$1" || file "$1"
+        ;;
+    application/*zip | application/x-tar | application/x-bzip2 \
+    | application/gzip | application/x-xz | application/x-rar)
+        command -v atool >/dev/null 2>&1 && atool --list -- "$1" || file "$1"
+        ;;
+    application/pgp-encrypted)
+        gpg -d -- "$1"
+        ;;
+    *)
+        file "$1"
+        ;;
+esac
+exit 1
