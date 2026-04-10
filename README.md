@@ -247,4 +247,4 @@ commands, tmux layout, setup plan, and meta flags.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL v3 — see [LICENSE](LICENSE).
