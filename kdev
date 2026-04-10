@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.0.0"
+readonly VERSION="2.1.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -85,6 +85,13 @@ _git_default_branch() {
 
 _git_is_dirty() {
   git -C "$1" status --porcelain 2>/dev/null | grep -q .
+}
+
+# Returns 0 if the directory is a functioning git worktree (git link resolves).
+# A broken worktree has a .git file pointing at a path that no longer exists
+# (e.g. after the main repo was renamed/moved).
+_git_worktree_valid() {
+  git -C "$1" rev-parse --git-dir &>/dev/null
 }
 
 # Add an entry to .gitignore if not already present.
@@ -588,7 +595,7 @@ cmd_dev() {
 
   local wt_dir="$repo_root/$WORKTREES_DIR/$name"
 
-  # Create worktree if it doesn't exist
+  # Create worktree if it doesn't exist; repair if git link is broken
   if [[ ! -d "$wt_dir" ]]; then
     mkdir -p "$repo_root/$WORKTREES_DIR"
     _ensure_gitignore "$repo_root" "$WORKTREES_DIR"
@@ -615,6 +622,37 @@ cmd_dev() {
     fi
 
     info "Worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
+
+  elif ! _git_worktree_valid "$wt_dir"; then
+    # Directory exists but git link is broken (e.g. repo was renamed/moved).
+    # Remove the orphaned directory first so `git worktree prune` sees it gone
+    # and drops the stale registration — otherwise `worktree add` would refuse
+    # to reuse the branch that's still "checked out" in the phantom worktree.
+    warn "Worktree '${name}' has a broken git link — repairing..."
+    rm -rf "$wt_dir"
+    git -C "$repo_root" worktree prune 2>/dev/null || true
+    mkdir -p "$repo_root/$WORKTREES_DIR"
+
+    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
+      # Branch survived the rename — reattach to it
+      step "Re-creating worktree ${BOLD}${name}${RESET} (existing branch)..."
+      git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
+        die "Failed to recreate worktree."
+    else
+      if [[ -z "$from_ref" ]]; then
+        from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"
+      fi
+      if [[ "$from_ref" != "HEAD" ]]; then
+        git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
+          die "Ref '$from_ref' does not exist."
+      fi
+      step "Re-creating worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
+      git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
+        die "Failed to recreate worktree."
+    fi
+
+    info "Repaired worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
+
   else
     dim "Worktree ${name} already exists"
   fi
@@ -646,6 +684,7 @@ cmd_launch() {
 
   local wt_dir="$repo_root/$WORKTREES_DIR/$name"
   [[ ! -d "$wt_dir" ]] && die "Worktree '$name' does not exist.\n  Create it with: ${CYAN}$SCRIPT_NAME dev $name${RESET}"
+  ! _git_worktree_valid "$wt_dir" && die "Worktree '$name' has a broken git link.\n  Run ${CYAN}$SCRIPT_NAME dev $name${RESET} to repair it."
 
   _launch_session "$repo_root" "$name" "$wt_dir"
 }
@@ -693,6 +732,11 @@ cmd_list() {
   for dir in "$wt_base"/*/; do
     [[ -d "$dir" ]] || continue
     name="$(basename "$dir")"
+
+    if ! _git_worktree_valid "$dir"; then
+      printf "  %-20s %-20s %-21b %-21b\n" "$name" "?" "${RED}broken${RESET}" "${DIM}none${RESET}"
+      continue
+    fi
 
     branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch="?"
 
@@ -747,6 +791,11 @@ cmd_delete() {
   local wt_dir="$repo_root/$WORKTREES_DIR/$name"
   [[ ! -d "$wt_dir" ]] && die "Worktree '$name' does not exist."
 
+  # Capture validity before any removal — used later to skip git worktree remove
+  # and to fall back to $name for branch deletion when git can't read the worktree.
+  local wt_valid=true
+  _git_worktree_valid "$wt_dir" || wt_valid=false
+
   local session_name
   session_name="$(_tmux_session_name "$(basename "$repo_root")")"
 
@@ -762,16 +811,20 @@ cmd_delete() {
     fi
   fi
 
-  # Check for uncommitted changes
-  if [[ "$force" != true ]] && _git_is_dirty "$wt_dir"; then
+  # Check for uncommitted changes (only meaningful when git link is intact)
+  if [[ "$force" != true ]] && [[ "$wt_valid" == true ]] && _git_is_dirty "$wt_dir"; then
     die "Worktree '$name' has uncommitted changes.\n  Commit or stash them, or use ${CYAN}--force${RESET}."
   fi
 
   local branch_name
   branch_name="$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" || true
+  # For broken worktrees git can't read the branch; fall back to the worktree name
+  # (kdev always names the branch after the worktree, so this is safe).
+  [[ -z "${branch_name:-}" ]] && branch_name="$name"
 
   step "Removing worktree ${BOLD}${name}${RESET}..."
-  if [[ "$force" == true ]]; then
+  if [[ "$wt_valid" == false ]] || [[ "$force" == true ]]; then
+    # git worktree remove requires a live git link; skip it for broken worktrees
     git -C "$repo_root" worktree remove --force "$wt_dir" 2>/dev/null ||
       rm -rf "$wt_dir"
   else
@@ -1229,6 +1282,26 @@ cmd_test() {
     _t_fail "D9 dev --from with bad ref fails"
   fi
 
+  # D10: dev auto-repairs broken worktree (branch survives)
+  (cd "$dev_repo" && cmd_dev "repair-wt") &>/dev/null
+  echo "gitdir: /nonexistent/path/.git/worktrees/repair-wt" \
+    > "$dev_repo/$WORKTREES_DIR/repair-wt/.git"
+  if (cd "$dev_repo" && cmd_dev "repair-wt") &>/dev/null \
+     && _git_worktree_valid "$dev_repo/$WORKTREES_DIR/repair-wt"; then
+    _t_pass "D10 dev auto-repairs broken worktree"
+  else
+    _t_fail "D10 dev auto-repairs broken worktree"
+  fi
+
+  # D11: repaired worktree is on the correct branch
+  local d11_branch
+  d11_branch="$(git -C "$dev_repo/$WORKTREES_DIR/repair-wt" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [[ "$d11_branch" == "repair-wt" ]]; then
+    _t_pass "D11 repaired worktree is on the correct branch"
+  else
+    _t_fail "D11 repaired worktree is on the correct branch — got '$d11_branch'"
+  fi
+
   # Clean up dev-repo tmux session
   tmux kill-session -t dev-repo 2>/dev/null || true
 
@@ -1269,6 +1342,18 @@ cmd_test() {
     _t_pass "L4 list with no worktrees shows helpful message"
   else
     _t_fail "L4 list with no worktrees shows helpful message"
+  fi
+
+  # L5: list shows 'broken' for a worktree with a broken git link
+  (cd "$dev_repo" && cmd_dev "list-broken-wt") &>/dev/null
+  echo "gitdir: /nonexistent/path/.git/worktrees/list-broken-wt" \
+    > "$dev_repo/$WORKTREES_DIR/list-broken-wt/.git"
+  local l5_output
+  l5_output="$(cd "$dev_repo" && cmd_list 2>&1)"
+  if echo "$l5_output" | grep -q "broken"; then
+    _t_pass "L5 list shows broken status for invalid worktree"
+  else
+    _t_fail "L5 list shows broken status for invalid worktree"
   fi
 
   # ─── X — Delete command ──────────────────────────────────────────────
@@ -1327,6 +1412,18 @@ cmd_test() {
 
   # Clean up remaining del-repo worktrees
   git -C "$del_repo" worktree remove "$del_repo/$WORKTREES_DIR/dirty-wt2" --force 2>/dev/null || true
+
+  # X6: delete removes a worktree with a broken git link (no --force needed)
+  (cd "$del_repo" && cmd_dev "broken-del-wt") &>/dev/null
+  tmux kill-session -t del-repo 2>/dev/null || true
+  echo "gitdir: /nonexistent/path/.git/worktrees/broken-del-wt" \
+    > "$del_repo/$WORKTREES_DIR/broken-del-wt/.git"
+  if (cd "$del_repo" && cmd_delete "broken-del-wt") &>/dev/null \
+     && [[ ! -d "$del_repo/$WORKTREES_DIR/broken-del-wt" ]]; then
+    _t_pass "X6 delete removes broken worktree without --force"
+  else
+    _t_fail "X6 delete removes broken worktree without --force"
+  fi
 
   # ─── T — tmux layout ─────────────────────────────────────────────────
   if command -v tmux &>/dev/null; then

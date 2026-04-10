@@ -242,8 +242,8 @@ in the script to make changes persist across `setup` re-runs.
 kdev --test
 ```
 
-51 tests covering git helpers, config generation, dev/launch/list/delete
-commands, tmux layout, setup plan, and meta flags.
+55 tests covering git helpers, config generation, dev/launch/list/delete
+commands (including broken worktree repair), tmux layout, setup plan, and meta flags.
 
 ## License
 
