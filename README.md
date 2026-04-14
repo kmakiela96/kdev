@@ -40,6 +40,33 @@ kdev setup
 kdev --version
 ```
 
+## Shell Completions
+
+Add to `~/.zshrc` (zsh):
+
+```zsh
+eval "$(kdev --completions zsh)"
+```
+
+Or `~/.bashrc` (bash):
+
+```bash
+eval "$(kdev --completions bash)"
+```
+
+Completes subcommands, options, and worktree names:
+
+```
+$ kdev <TAB>
+adding-new-features  delete  dev  launch  list  setup
+
+$ kdev delete <TAB>
+adding-new-features  feature-auth
+
+$ kdev dev --<TAB>
+--from  --help
+```
+
 ## Quick Start
 
 ```bash
@@ -75,6 +102,7 @@ Installs (idempotent — safe to re-run):
 | Neovim            | `brew install`               |
 | lazygit           | `brew install`               |
 | lf                | `brew install`               |
+| bat               | `brew install`               |
 | git               | `brew install`               |
 | node/npm          | `brew install`               |
 | pi-coding-agent   | `npm install -g`             |
@@ -84,12 +112,19 @@ Configs written:
 
 | File                                         | What                              |
 |----------------------------------------------|-----------------------------------|
+| `~/.config/alacritty/alacritty.toml`         | Alacritty config (Option key)     |
 | `~/.config/tmux/tmux.conf`                   | Full tmux config (Tokyo Night)    |
-| `~/.config/alacritty/alacritty.toml`         | Cmd+hjkl keybindings (appended)   |
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
+| `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
+| `~/.zshrc`                                   | Shell completions (appended)      |
 
 If `~/.tmux.conf` exists, it is backed up to `~/.tmux.conf.bak` and removed
-so tmux reads the XDG-compliant location.
+so tmux reads the XDG-compliant location. If `~/.config/alacritty/alacritty.toml`
+exists, it is backed up before writing the kdev version.
+
+The Alacritty config sets `option_as_alt = "OnlyLeft"` so that:
+- **Left Option** = Alt (tmux `M-1`…`M-9` window switching)
+- **Right Option** = macOS compose (diacritics: ą ć ę ł ń ó ś ź ż)
 
 ### `dev` — Create Worktree + Start Session
 
@@ -106,7 +141,7 @@ kdev dev <name> [--from <ref>]
 │                  │    lazygit       │
 │    pi agent      │   (top-right)    │
 │    (left, 50%)   ├──────────────────┤
-│                  │    nvim .        │
+│                  │    lf            │
 │                  │  (bottom-right)  │
 └──────────────────┴──────────────────┘
 ```
@@ -166,36 +201,30 @@ Removes the worktree directory, prunes git metadata, and deletes the branch
 
 ## Keybindings
 
-### Pane management (no prefix needed)
-
-| Shortcut              | Action                              |
-|-----------------------|-------------------------------------|
-| `Option+h/j/k/l`     | Navigate panes (left/down/up/right) |
-| `Option+Shift+H/J/K/L` | Swap pane position               |
-| `Option+Shift+F`     | Toggle pane fullscreen (zoom)       |
-| `Option+1-9`         | Switch to window by number          |
+All pane and window controls go through the `Ctrl-a` prefix — no conflicts
+with applications running inside panes (lf, lazygit, nvim, etc.).
 
 ### tmux (prefix: Ctrl-a)
 
-| Shortcut           | Action                           |
-|--------------------|----------------------------------|
-| `Ctrl-a \|`        | Split pane vertically            |
-| `Ctrl-a -`         | Split pane horizontally          |
-| `Ctrl-a g`         | New window: lazygit              |
-| `Ctrl-a f`         | New window: lf file manager      |
-| `Ctrl-a e`         | New window: nvim                 |
-| `Ctrl-a c`         | New window: shell                |
-| `Ctrl-a d`         | Detach session                   |
-| `Ctrl-a H/J/K/L`  | Resize panes                     |
-| `Ctrl-a Ctrl-s`    | Save session (tmux-resurrect)    |
-| `Ctrl-a Ctrl-r`    | Restore session (tmux-resurrect) |
+| Shortcut            | Action                           |
+|---------------------|----------------------------------|
+| `Ctrl-a h/j/k/l`   | Navigate panes                   |
+| `Ctrl-a H/J/K/L`   | Swap pane position               |
+| `Ctrl-a f`          | Toggle pane zoom (fullscreen)    |
+| `Ctrl-a \|`         | Split pane vertically            |
+| `Ctrl-a -`          | Split pane horizontally          |
+| `Ctrl-a g`          | New window: lazygit              |
+| `Ctrl-a e`          | New window: nvim                 |
+| `Ctrl-a c`          | New window: shell                |
+| `Ctrl-a d`          | Detach session                   |
+| `Ctrl-a Ctrl-s`     | Save session (tmux-resurrect)    |
+| `Ctrl-a Ctrl-r`     | Restore session (tmux-resurrect) |
 
-### Alacritty
+### Window switching (no prefix)
 
-`option_as_alt = "Both"` is set in `alacritty.toml`, so both Option keys
-act as Alt (sending escape sequences to tmux). This means macOS special
-characters (Option+e for acute accent, etc.) are not available inside
-Alacritty.
+| Shortcut      | Action                      |
+|---------------|-----------------------------|
+| `Option+1-9`  | Switch to window by number  |
 
 ## Persistence
 
@@ -226,12 +255,12 @@ in the script to make changes persist across `setup` re-runs.
 
 ```
 ~/.config/
+  alacritty/
+    alacritty.toml               # generated by setup (Option key)
   tmux/
     tmux.conf                    # generated by setup
     plugins/
       tmux-resurrect/            # session persistence
-  alacritty/
-    alacritty.toml               # your config + appended keybindings
   nvim/
     init.lua                     # your neovim config (untouched)
 ```
@@ -242,8 +271,9 @@ in the script to make changes persist across `setup` re-runs.
 kdev --test
 ```
 
-55 tests covering git helpers, config generation, dev/launch/list/delete
-commands (including broken worktree repair), tmux layout, setup plan, and meta flags.
+58 tests covering git helpers, config generation (tmux + Alacritty),
+dev/launch/list/delete commands (including broken worktree repair), tmux
+layout, setup plan, and meta flags.
 
 ## License
 

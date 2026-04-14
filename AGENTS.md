@@ -39,8 +39,8 @@ Before every commit:
 2. **Helpers** — `die`, `_err`, `warn`, `info`, `dim`, `step`
 3. **Git helpers** — `_find_repo_root`, `_git_default_branch`, `_git_is_dirty`, `_ensure_gitignore`
 4. **tmux helpers** — `_tmux_session_name`, `_tmux_attach_or_switch`
-5. **Config generators** — `_tmux_conf_content`, `_alacritty_keys_content`
-6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_append_alacritty_keys`, `_install_tmux_resurrect`
+5. **Config generators** — `_tmux_conf_content`
+6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_install_tmux_resurrect`
 7. **Subcommand: setup** — `cmd_setup`
 8. **Layout** — `_setup_dev_layout` (3-pane tmux layout)
 9. **Session launcher** — `_launch_session` (shared by dev and launch)
