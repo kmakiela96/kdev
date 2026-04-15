@@ -116,6 +116,7 @@ Configs written:
 | `~/.config/tmux/tmux.conf`                   | Full tmux config (Tokyo Night)    |
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
+| `~/.agents/skills/`                          | pi agent skills (ck, cqs, etc.)   |
 | `~/.zshrc`                                   | Shell completions (appended)      |
 
 If `~/.tmux.conf` exists, it is backed up to `~/.tmux.conf.bak` and removed
@@ -271,9 +272,9 @@ in the script to make changes persist across `setup` re-runs.
 kdev --test
 ```
 
-58 tests covering git helpers, config generation (tmux + Alacritty),
+61 tests covering git helpers, config generation (tmux + Alacritty),
 dev/launch/list/delete commands (including broken worktree repair), tmux
-layout, setup plan, and meta flags.
+layout, setup plan (including skills install), and meta flags.
 
 ## License
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.6.0"
+readonly VERSION="2.7.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -551,6 +551,36 @@ _install_tmux_resurrect() {
   info "tmux-resurrect installed → ${plugin_dir}"
 }
 
+# Copy skills/ from the kdev repo into ~/.agents/skills/.
+# Each skill is a subdirectory containing SKILL.md. Existing skills with the
+# same name are overwritten so updates are picked up on re-run.
+_install_skills() {
+  local skills_src
+  skills_src="$(dirname "$(_script_path)")/skills"
+
+  if [[ ! -d "$skills_src" ]]; then
+    warn "skills/ directory not found next to kdev — skipping."
+    return 0
+  fi
+
+  local dest="$HOME/.agents/skills"
+  mkdir -p "$dest"
+
+  local dir name copied=0
+  for dir in "$skills_src"/*/; do
+    [[ -d "$dir" ]] || continue
+    name="$(basename "$dir")"
+    cp -R "$dir" "$dest/$name"
+    ((copied++)) || true
+  done
+
+  if [[ $copied -gt 0 ]]; then
+    info "Installed $copied skill(s) → ${dest}"
+  else
+    dim "  No skills found in ${skills_src}"
+  fi
+}
+
 # ─── Subcommand: setup ───────────────────────────────────────────────────────
 
 cmd_setup() {
@@ -645,6 +675,21 @@ cmd_setup() {
       echo "  [would install]     lf config → ~/.config/lf"
     fi
 
+    local skills_src
+    skills_src="$(dirname "$(_script_path)")/skills"
+    local skills_dest="$HOME/.agents/skills"
+    if [[ -d "$skills_src" ]]; then
+      local skill_count=0 sdir
+      for sdir in "$skills_src"/*/; do
+        [[ -d "$sdir" ]] && ((skill_count++)) || true
+      done
+      if [[ $skill_count -gt 0 ]]; then
+        echo "  [would install]     $skill_count skill(s) → ~/.agents/skills/"
+      fi
+    else
+      echo -e "  ${DIM}[not found]${RESET}         skills/ directory"
+    fi
+
     echo ""
     if command -v "$SCRIPT_NAME" &>/dev/null; then
       echo -e "  ${DIM}[in PATH]${RESET}           $SCRIPT_NAME → $(command -v "$SCRIPT_NAME")"
@@ -676,6 +721,7 @@ cmd_setup() {
   local _zshrc_modified=false
   _append_zsh_completions
   _install_lf_config
+  _install_skills
 
   # Offer to symlink into PATH
   echo ""
@@ -1713,6 +1759,37 @@ cmd_test() {
   _t_grep "S4 setup --plan mentions zsh completions" "zshrc" cmd_setup --plan
   _t_grep "S5 setup --plan mentions lf config" "lf config" cmd_setup --plan
   _t_grep "S6 setup --plan mentions alacritty config" "alacritty" cmd_setup --plan
+  _t_grep "S7 setup --plan mentions skills" "skill" cmd_setup --plan
+
+  # S8: _install_skills copies skills to ~/.agents/skills/
+  local s8_dest="$TMPBASE/s8_home/.agents/skills"
+  (
+    export HOME="$TMPBASE/s8_home"
+    _install_skills
+  ) &>/dev/null
+  local s8_ok=true
+  local s8_skill
+  for s8_skill in ck cqs caveman; do
+    if [[ ! -f "$s8_dest/$s8_skill/SKILL.md" ]]; then
+      s8_ok=false
+      break
+    fi
+  done
+  if $s8_ok; then
+    _t_pass "S8 _install_skills copies skills to ~/.agents/skills/"
+  else
+    _t_fail "S8 _install_skills copies skills to ~/.agents/skills/"
+  fi
+
+  # S9: _install_skills is idempotent (re-run succeeds)
+  if (
+    export HOME="$TMPBASE/s8_home"
+    _install_skills
+  ) &>/dev/null; then
+    _t_pass "S9 _install_skills is idempotent"
+  else
+    _t_fail "S9 _install_skills is idempotent"
+  fi
 
   # ─── V — Meta ────────────────────────────────────────────────────────
   _section "V — Meta"
