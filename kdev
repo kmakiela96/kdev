@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.8.0"
+readonly VERSION="2.9.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -622,6 +622,22 @@ _install_skills() {
   fi
 }
 
+_install_global_agents_md() {
+  local src
+  src="$(dirname "$(_script_path)")/global-agents.md"
+
+  if [[ ! -f "$src" ]]; then
+    warn "global-agents.md not found next to kdev — skipping."
+    return 0
+  fi
+
+  local dest_dir="$HOME/.pi/agent"
+  local dest="$dest_dir/AGENTS.md"
+  mkdir -p "$dest_dir"
+  cp "$src" "$dest"
+  info "Installed global AGENTS.md → ${dest}"
+}
+
 # ─── Subcommand: setup ───────────────────────────────────────────────────────
 
 cmd_setup() {
@@ -731,6 +747,19 @@ cmd_setup() {
       echo -e "  ${DIM}[not found]${RESET}         skills/ directory"
     fi
 
+    local agents_src
+    agents_src="$(dirname "$(_script_path)")/global-agents.md"
+    local agents_dest="$HOME/.pi/agent/AGENTS.md"
+    if [[ -f "$agents_src" ]]; then
+      if [[ -f "$agents_dest" ]] && diff -q "$agents_src" "$agents_dest" &>/dev/null; then
+        echo -e "  ${DIM}[up to date]${RESET}        global AGENTS.md"
+      else
+        echo "  [would install]     global AGENTS.md → ~/.pi/agent/AGENTS.md"
+      fi
+    else
+      echo -e "  ${DIM}[not found]${RESET}         global-agents.md"
+    fi
+
     echo ""
     if command -v "$SCRIPT_NAME" &>/dev/null; then
       echo -e "  ${DIM}[in PATH]${RESET}           $SCRIPT_NAME → $(command -v "$SCRIPT_NAME")"
@@ -763,6 +792,7 @@ cmd_setup() {
   _append_zsh_completions
   _install_lf_config
   _install_skills
+  _install_global_agents_md
 
   # Offer to symlink into PATH
   echo ""
@@ -1879,6 +1909,31 @@ cmd_test() {
     _t_pass "S9 _install_skills is idempotent"
   else
     _t_fail "S9 _install_skills is idempotent"
+  fi
+
+  # S10: setup --plan mentions global AGENTS.md
+  _t_grep "S10 setup --plan mentions global AGENTS.md" "global AGENTS.md" cmd_setup --plan
+
+  # S11: _install_global_agents_md copies to ~/.pi/agent/AGENTS.md
+  mkdir -p "$TMPBASE/s11_home"
+  (
+    export HOME="$TMPBASE/s11_home"
+    _install_global_agents_md
+  ) &>/dev/null
+  if [[ -f "$TMPBASE/s11_home/.pi/agent/AGENTS.md" ]]; then
+    _t_pass "S11 _install_global_agents_md copies to ~/.pi/agent/AGENTS.md"
+  else
+    _t_fail "S11 _install_global_agents_md copies to ~/.pi/agent/AGENTS.md"
+  fi
+
+  # S12: _install_global_agents_md is idempotent
+  if (
+    export HOME="$TMPBASE/s11_home"
+    _install_global_agents_md
+  ) &>/dev/null; then
+    _t_pass "S12 _install_global_agents_md is idempotent"
+  else
+    _t_fail "S12 _install_global_agents_md is idempotent"
   fi
 
   # ─── V — Meta ────────────────────────────────────────────────────────

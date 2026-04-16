@@ -8,7 +8,7 @@ Manages parallel git worktrees with tmux sessions. Each worktree gets a
 3-pane layout (pi coding agent, lazygit, neovim).
 
 Also in the repo: `zproj` (upstream fork, do not modify), `skills/`,
-`rules/`, `README.md`.
+`rules/`, `global-agents.md`, `README.md`.
 
 ## Build & Test
 

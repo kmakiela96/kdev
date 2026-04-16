@@ -117,6 +117,7 @@ Configs written:
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
 | `~/.agents/skills/`                          | pi agent skills (ck, cqs, etc.)   |
+| `~/.pi/agent/AGENTS.md`                       | Global pi agent instructions      |
 | `~/.zshrc`                                   | Shell completions (appended)      |
 
 If `~/.tmux.conf` exists, it is backed up to `~/.tmux.conf.bak` and removed
