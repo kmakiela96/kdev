@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.7.0"
+readonly VERSION="2.8.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -85,6 +85,47 @@ _git_default_branch() {
 
 _git_is_dirty() {
   git -C "$1" status --porcelain 2>/dev/null | grep -q .
+}
+
+# Fetch origin and warn if default branch is behind remote.
+# Returns 0 (proceed) or 1 (user aborted).
+_git_fetch_and_check() {
+  local repo="$1"
+  local default_branch
+  default_branch="$(_git_default_branch "$repo")" || return 0
+
+  # No remote → nothing to check
+  git -C "$repo" remote | grep -q . || return 0
+
+  step "Fetching origin..."
+  git -C "$repo" fetch origin --quiet 2>/dev/null || {
+    warn "Failed to fetch origin — continuing with local state."
+    return 0
+  }
+
+  # Check if remote tracking branch exists
+  local remote_ref="refs/remotes/origin/${default_branch}"
+  git -C "$repo" show-ref --verify --quiet "$remote_ref" 2>/dev/null || return 0
+
+  local local_rev remote_rev
+  local_rev="$(git -C "$repo" rev-parse "refs/heads/${default_branch}" 2>/dev/null)" || return 0
+  remote_rev="$(git -C "$repo" rev-parse "$remote_ref" 2>/dev/null)" || return 0
+
+  if [[ "$local_rev" == "$remote_rev" ]]; then
+    return 0
+  fi
+
+  local behind
+  behind="$(git -C "$repo" rev-list --count "refs/heads/${default_branch}..${remote_ref}" 2>/dev/null)" || behind=0
+
+  if [[ "$behind" -gt 0 ]]; then
+    warn "Local ${BOLD}${default_branch}${RESET} is ${BOLD}${behind}${RESET} commit(s) behind ${BOLD}origin/${default_branch}${RESET}."
+    if ! _confirm "  Continue creating worktree from local ${default_branch}?"; then
+      _err "Aborted. Pull ${default_branch} first: git checkout ${default_branch} && git pull"
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # Returns 0 if the directory is a functioning git worktree (git link resolves).
@@ -877,6 +918,12 @@ cmd_dev() {
 
   local wt_dir="$repo_root/$WORKTREES_DIR/$name"
 
+  # Fetch and warn about stale default branch before creating new worktree
+  if [[ ! -d "$wt_dir" || ! $(_git_worktree_valid "$wt_dir" 2>/dev/null) ]] \
+     && [[ -z "$from_ref" ]]; then
+    _git_fetch_and_check "$repo_root" || return 1
+  fi
+
   # Create worktree if it doesn't exist; repair if git link is broken
   if [[ ! -d "$wt_dir" ]]; then
     mkdir -p "$repo_root/$WORKTREES_DIR"
@@ -1535,6 +1582,49 @@ cmd_test() {
     _t_pass "D11 repaired worktree is on the correct branch"
   else
     _t_fail "D11 repaired worktree is on the correct branch — got '$d11_branch'"
+  fi
+
+  # D12: _git_fetch_and_check warns when local branch is behind remote
+  local d12_remote="$TMPBASE/d12-remote"
+  local d12_local="$TMPBASE/d12-local"
+  git init --bare "$d12_remote" --quiet
+  git clone "$d12_remote" "$d12_local" --quiet 2>/dev/null
+  (cd "$d12_local" && git commit --allow-empty -m "c1" --quiet && git push --quiet 2>/dev/null)
+  # Advance remote past local
+  local d12_clone2="$TMPBASE/d12-clone2"
+  git clone "$d12_remote" "$d12_clone2" --quiet 2>/dev/null
+  (cd "$d12_clone2" && git commit --allow-empty -m "c2" --quiet && git push --quiet 2>/dev/null)
+  local d12_output
+  d12_output="$(_git_fetch_and_check "$d12_local" 2>&1 </dev/null)" || true
+  if echo "$d12_output" | grep -q "behind"; then
+    _t_pass "D12 _git_fetch_and_check warns when behind remote"
+  else
+    _t_fail "D12 _git_fetch_and_check warns when behind remote"
+  fi
+
+  # D13: _git_fetch_and_check silent when up to date
+  local d13_repo="$TMPBASE/d13-repo"
+  local d13_remote="$TMPBASE/d13-remote"
+  git init --bare "$d13_remote" --quiet
+  git clone "$d13_remote" "$d13_repo" --quiet 2>/dev/null
+  (cd "$d13_repo" && git commit --allow-empty -m "c1" --quiet && git push --quiet 2>/dev/null)
+  local d13_output
+  d13_output="$(_git_fetch_and_check "$d13_repo" 2>&1)"
+  if echo "$d13_output" | grep -q "behind"; then
+    _t_fail "D13 _git_fetch_and_check silent when up to date"
+  else
+    _t_pass "D13 _git_fetch_and_check silent when up to date"
+  fi
+
+  # D14: _git_fetch_and_check skips when no remote
+  local d14_repo="$TMPBASE/d14-repo"
+  mkdir -p "$d14_repo"
+  git -C "$d14_repo" init --quiet
+  git -C "$d14_repo" commit --allow-empty -m "c1" --quiet
+  if _git_fetch_and_check "$d14_repo" 2>/dev/null; then
+    _t_pass "D14 _git_fetch_and_check skips when no remote"
+  else
+    _t_fail "D14 _git_fetch_and_check skips when no remote"
   fi
 
   # Clean up dev-repo tmux session
