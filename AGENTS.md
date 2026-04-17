@@ -5,7 +5,7 @@
 Single-file bash script (`kdev`) that sets up a keyboard-driven
 terminal dev environment on macOS using Alacritty + tmux + Neovim + lazygit.
 Manages parallel git worktrees with tmux sessions. Each worktree gets a
-3-pane layout (pi coding agent, lazygit, neovim). tmux uses two modes:
+3-pane layout (pi coding agent, lazygit, lf). tmux uses two modes:
 `Ctrl-a` toggles persistent nav mode (vim hjkl), `Ctrl-b` is one-shot prefix
 for structural commands.
 
@@ -41,8 +41,8 @@ Before every commit:
 2. **Helpers** — `die`, `_err`, `warn`, `info`, `dim`, `step`
 3. **Git helpers** — `_find_repo_root`, `_git_default_branch`, `_git_is_dirty`, `_ensure_gitignore`
 4. **tmux helpers** — `_tmux_session_name`, `_tmux_attach_or_switch`
-5. **Config generators** — `_tmux_conf_content`
-6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_install_tmux_resurrect`
+5. **Config generators** — `_tmux_conf_content`, `_alacritty_conf_content`
+6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_write_alacritty_conf`, `_install_lf_config`, `_install_tmux_resurrect`, `_install_skills`, `_install_global_agents_md`
 7. **Subcommand: setup** — `cmd_setup`
 8. **Layout** — `_setup_dev_layout` (3-pane tmux layout)
 9. **Session launcher** — `_launch_session` (shared by dev and launch)

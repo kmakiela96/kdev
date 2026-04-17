@@ -13,7 +13,7 @@
 
 One command sets up Alacritty + tmux + Neovim + lazygit + lf. Another command
 creates a git worktree with a 3-pane tmux layout — pi coding agent, lazygit,
-and neovim — all pointed at the right directory.
+and lf — all pointed at the right directory.
 
 ## Requirements
 
@@ -246,8 +246,8 @@ The status bar shows a yellow **NAV** indicator when nav mode is active.
 
 - tmux sessions survive terminal close — reattach with `tmux attach`
 - tmux-resurrect saves/restores sessions across tmux server restarts:
-  - `Ctrl-a Ctrl-s` to save
-  - `Ctrl-a Ctrl-r` to restore
+  - `Ctrl-b Ctrl-s` to save
+  - `Ctrl-b Ctrl-r` to restore
 
 ## Customization
 
