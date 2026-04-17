@@ -203,24 +203,38 @@ Removes the worktree directory, prunes git metadata, and deletes the branch
 
 ## Keybindings
 
-All pane and window controls go through the `Ctrl-a` prefix — no conflicts
-with applications running inside panes (lf, lazygit, nvim, etc.).
+tmux uses two modes: **nav mode** (`Ctrl-a` toggle) for persistent vim-style
+navigation, and **prefix** (`Ctrl-b`) for one-shot structural commands.
 
-### tmux (prefix: Ctrl-a)
+### Nav mode (Ctrl-a toggle on/off)
+
+Press `Ctrl-a` to enter nav mode. Keys work repeatedly without re-pressing
+the prefix. Press `Ctrl-a` or `Esc` to exit.
+
+| Shortcut  | Action                           |
+|-----------|----------------------------------|
+| `h/j/k/l` | Navigate panes                  |
+| `H/J/K/L` | Swap pane position              |
+| `f`        | Toggle pane zoom (fullscreen)   |
+| `d`        | Kill window                     |
+| `p`        | New window: pi agent            |
+| `Ctrl-a`   | Exit nav mode                   |
+| `Esc`      | Exit nav mode                   |
+
+The status bar shows a yellow **NAV** indicator when nav mode is active.
+
+### Prefix (Ctrl-b, one-shot)
 
 | Shortcut            | Action                           |
 |---------------------|----------------------------------|
-| `Ctrl-a h/j/k/l`   | Navigate panes                   |
-| `Ctrl-a H/J/K/L`   | Swap pane position               |
-| `Ctrl-a f`          | Toggle pane zoom (fullscreen)    |
-| `Ctrl-a \|`         | Split pane vertically            |
-| `Ctrl-a -`          | Split pane horizontally          |
-| `Ctrl-a g`          | New window: lazygit              |
-| `Ctrl-a e`          | New window: nvim                 |
-| `Ctrl-a c`          | New window: shell                |
-| `Ctrl-a d`          | Detach session                   |
-| `Ctrl-a Ctrl-s`     | Save session (tmux-resurrect)    |
-| `Ctrl-a Ctrl-r`     | Restore session (tmux-resurrect) |
+| `Ctrl-b \|`         | Split pane vertically            |
+| `Ctrl-b -`          | Split pane horizontally          |
+| `Ctrl-b g`          | New window: lazygit              |
+| `Ctrl-b e`          | New window: nvim                 |
+| `Ctrl-b c`          | New window: shell                |
+| `Ctrl-b d`          | Detach session                   |
+| `Ctrl-b Ctrl-s`     | Save session (tmux-resurrect)    |
+| `Ctrl-b Ctrl-r`     | Restore session (tmux-resurrect) |
 
 ### Window switching (no prefix)
 
@@ -273,7 +287,7 @@ in the script to make changes persist across `setup` re-runs.
 kdev --test
 ```
 
-67 tests covering git helpers, config generation (tmux + Alacritty),
+71 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
 dev/launch/list/delete commands (including broken worktree repair), tmux
 layout, setup plan (including skills install), and meta flags.
 

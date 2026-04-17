@@ -5,7 +5,9 @@
 Single-file bash script (`kdev`) that sets up a keyboard-driven
 terminal dev environment on macOS using Alacritty + tmux + Neovim + lazygit.
 Manages parallel git worktrees with tmux sessions. Each worktree gets a
-3-pane layout (pi coding agent, lazygit, neovim).
+3-pane layout (pi coding agent, lazygit, neovim). tmux uses two modes:
+`Ctrl-a` toggles persistent nav mode (vim hjkl), `Ctrl-b` is one-shot prefix
+for structural commands.
 
 Also in the repo: `zproj` (upstream fork, do not modify), `skills/`,
 `rules/`, `global-agents.md`, `README.md`.
