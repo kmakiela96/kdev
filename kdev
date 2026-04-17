@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.11.0"
+readonly VERSION="2.12.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -189,35 +189,45 @@ set -g escape-time 0
 set -g focus-events on
 set -g renumber-windows on
 
-# ─── Prefix: Ctrl-a ──────────────────────────────────
-set -g prefix C-a
-unbind C-b
-bind C-a send-prefix
+# ─── Prefix: Ctrl-b (one-shot structural commands) ───
+set -g prefix C-b
+unbind C-a
 
-# ─── Splits (in current path) ────────────────────────
+# ─── Splits (prefix + |/-) ───────────────────────────
 bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
 unbind '"'
 unbind %
 
-# ─── Pane navigation (prefix + hjkl) ─────────────────
-bind h select-pane -L
-bind j select-pane -D
-bind k select-pane -U
-bind l select-pane -R
-
-# ─── Pane swap (prefix + HJKL) ───────────────────────
-bind H swap-pane -d -t '{left-of}'
-bind J swap-pane -d -t '{down-of}'
-bind K swap-pane -d -t '{up-of}'
-bind L swap-pane -d -t '{right-of}'
-
-# ─── Pane zoom (prefix + f) ──────────────────────────
-bind f resize-pane -Z
-
-# ─── Quick program windows ───────────────────────────
+# ─── Quick program windows (prefix) ──────────────────
 bind g new-window -n "lazygit" -c "#{pane_current_path}" "lazygit"
 bind e new-window -n "editor" -c "#{pane_current_path}" "nvim ."
+
+# ─── Nav mode: Ctrl-a toggles persistent vim nav ─────
+bind -n C-a switch-client -T nav
+bind -T nav C-a switch-client -T root
+bind -T nav Escape switch-client -T root
+
+# Nav: pane navigation (hjkl) — sticky
+bind -T nav h select-pane -L \; switch-client -T nav
+bind -T nav j select-pane -D \; switch-client -T nav
+bind -T nav k select-pane -U \; switch-client -T nav
+bind -T nav l select-pane -R \; switch-client -T nav
+
+# Nav: pane swap (HJKL) — sticky
+bind -T nav H swap-pane -d -t '{left-of}'  \; switch-client -T nav
+bind -T nav J swap-pane -d -t '{down-of}'  \; switch-client -T nav
+bind -T nav K swap-pane -d -t '{up-of}'    \; switch-client -T nav
+bind -T nav L swap-pane -d -t '{right-of}' \; switch-client -T nav
+
+# Nav: zoom toggle (f) — sticky
+bind -T nav f resize-pane -Z \; switch-client -T nav
+
+# Nav: kill window (d) — sticky
+bind -T nav d kill-window \; switch-client -T nav
+
+# Nav: new pi agent window (p) — exits nav
+bind -T nav p new-window -n "agent" -c "#{pane_current_path}" "pi" \; switch-client -T root
 
 # ─── Window navigation ───────────────────────────────
 bind -n M-1 select-window -t 1
@@ -235,8 +245,8 @@ setw -g mode-keys vi
 
 # ─── Status bar (Tokyo Night) ────────────────────────
 set -g status-style "bg=#1a1b26,fg=#565f89"
-set -g status-left "#[fg=#7aa2f7,bold] #S "
-set -g status-left-length 30
+set -g status-left "#[fg=#7aa2f7,bold] #S #{?#{==:#{client_key_table},nav},#[fg=#e0af68 bold] NAV ,}"
+set -g status-left-length 40
 set -g status-right "#[fg=#565f89] %H:%M "
 set -g window-status-current-format "#[fg=#7aa2f7,bold] #I:#W "
 set -g window-status-format "#[fg=#565f89] #I:#W "
@@ -1465,18 +1475,18 @@ cmd_test() {
   local tmux_content
   tmux_content="$(_tmux_conf_content)"
 
-  # C1: tmux conf includes prefix C-a
-  if echo "$tmux_content" | grep -q "prefix C-a"; then
-    _t_pass "C1 tmux conf includes prefix C-a"
+  # C1: tmux conf includes prefix C-b
+  if echo "$tmux_content" | grep -q "prefix C-b"; then
+    _t_pass "C1 tmux conf includes prefix C-b"
   else
-    _t_fail "C1 tmux conf includes prefix C-a"
+    _t_fail "C1 tmux conf includes prefix C-b"
   fi
 
-  # C2: tmux conf includes prefix hjkl pane navigation
-  if echo "$tmux_content" | grep -q "bind h select-pane -L"; then
-    _t_pass "C2 tmux conf includes prefix hjkl pane navigation"
+  # C2: tmux conf includes nav mode hjkl pane navigation
+  if echo "$tmux_content" | grep -q "bind -T nav h select-pane -L"; then
+    _t_pass "C2 tmux conf includes nav mode hjkl pane navigation"
   else
-    _t_fail "C2 tmux conf includes prefix hjkl pane navigation"
+    _t_fail "C2 tmux conf includes nav mode hjkl pane navigation"
   fi
 
   # C3: tmux conf includes tmux-resurrect
@@ -1493,18 +1503,46 @@ cmd_test() {
     _t_fail "C4 tmux conf includes quick-window bindings"
   fi
 
-  # C5: tmux conf includes pane swap bindings
-  if echo "$tmux_content" | grep -q "bind H swap-pane"; then
-    _t_pass "C5 tmux conf includes pane swap bindings"
+  # C5: tmux conf includes nav mode pane swap bindings
+  if echo "$tmux_content" | grep -q "bind -T nav H swap-pane"; then
+    _t_pass "C5 tmux conf includes nav mode pane swap bindings"
   else
-    _t_fail "C5 tmux conf includes pane swap bindings"
+    _t_fail "C5 tmux conf includes nav mode pane swap bindings"
   fi
 
-  # C6: tmux conf includes zoom toggle
-  if echo "$tmux_content" | grep -q "bind f resize-pane -Z"; then
-    _t_pass "C6 tmux conf includes zoom toggle binding"
+  # C6: tmux conf includes nav mode zoom toggle
+  if echo "$tmux_content" | grep -q "bind -T nav f resize-pane -Z"; then
+    _t_pass "C6 tmux conf includes nav mode zoom toggle binding"
   else
-    _t_fail "C6 tmux conf includes zoom toggle binding"
+    _t_fail "C6 tmux conf includes nav mode zoom toggle binding"
+  fi
+
+  # C8: tmux conf includes C-a nav mode toggle
+  if echo "$tmux_content" | grep -q "bind -n C-a switch-client -T nav"; then
+    _t_pass "C8 tmux conf includes C-a nav mode toggle"
+  else
+    _t_fail "C8 tmux conf includes C-a nav mode toggle"
+  fi
+
+  # C9: tmux conf includes nav mode kill-window (d)
+  if echo "$tmux_content" | grep -q "bind -T nav d kill-window"; then
+    _t_pass "C9 tmux conf includes nav mode kill-window binding"
+  else
+    _t_fail "C9 tmux conf includes nav mode kill-window binding"
+  fi
+
+  # C10: tmux conf includes nav mode pi agent window (p)
+  if echo "$tmux_content" | grep -q 'bind -T nav p new-window'; then
+    _t_pass "C10 tmux conf includes nav mode pi agent window binding"
+  else
+    _t_fail "C10 tmux conf includes nav mode pi agent window binding"
+  fi
+
+  # C11: tmux conf includes NAV indicator in status bar
+  if echo "$tmux_content" | grep -q 'NAV'; then
+    _t_pass "C11 tmux conf includes NAV indicator in status bar"
+  else
+    _t_fail "C11 tmux conf includes NAV indicator in status bar"
   fi
 
   # C7: alacritty conf includes option_as_alt
@@ -1843,19 +1881,26 @@ cmd_test() {
       _t_fail "T6 launch fails for non-existent worktree"
     fi
 
-    # T7: launch sources kdev tmux config (prefix restored to C-a)
-    if [[ -f "$HOME/.config/tmux/tmux.conf" ]]; then
-      tmux set-option -g prefix C-b 2>/dev/null
-      (cd "$tmux_repo" && cmd_dev "tmux-test") &>/dev/null
-      local t7_prefix
-      t7_prefix="$(tmux show-option -g prefix 2>/dev/null | awk '{print $2}')"
-      if [[ "$t7_prefix" == "C-a" ]]; then
-        _t_pass "T7 launch sources kdev tmux config"
-      else
-        _t_fail "T7 launch sources kdev tmux config — prefix is '$t7_prefix'"
-      fi
+    # T7: launch sources kdev tmux config (prefix restored to C-b)
+    local t7_conf="$HOME/.config/tmux/tmux.conf"
+    local t7_backup=""
+    if [[ -f "$t7_conf" ]]; then
+      t7_backup="${t7_conf}.t7bak"
+      cp "$t7_conf" "$t7_backup"
+    fi
+    mkdir -p "$(dirname "$t7_conf")"
+    _tmux_conf_content > "$t7_conf"
+    tmux set-option -g prefix C-a 2>/dev/null
+    (cd "$tmux_repo" && cmd_dev "tmux-test") &>/dev/null
+    local t7_prefix
+    t7_prefix="$(tmux show-option -g prefix 2>/dev/null | awk '{print $2}')"
+    if [[ "$t7_prefix" == "C-b" ]]; then
+      _t_pass "T7 launch sources kdev tmux config"
     else
-      _t_skip "T7 launch sources kdev tmux config"
+      _t_fail "T7 launch sources kdev tmux config — prefix is '$t7_prefix'"
+    fi
+    if [[ -n "${t7_backup:-}" ]]; then
+      mv "$t7_backup" "$t7_conf"
     fi
 
     tmux kill-session -t "$tmux_session" 2>/dev/null || true
