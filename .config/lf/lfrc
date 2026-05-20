@@ -20,6 +20,9 @@ cmd open &{{
         application/xml|application/toml|application/x-yaml)
             lf -remote "send $id \$nvim \"$f\""
             ;;
+        application/pdf)
+            zathura "$f" &>/dev/null &
+            ;;
         *)
             open "$f"
             ;;

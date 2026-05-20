@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.20.3"
+readonly VERSION="2.21.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -477,6 +477,19 @@ _install_brew_cask() {
   info "$name installed"
 }
 
+_install_brew_tap_formula() {
+  local tap="$1" name="$2" binary="${3:-$2}"
+  if command -v "$binary" &>/dev/null; then
+    dim "  [installed]  $name"
+    return 0
+  fi
+  step "Tapping ${CYAN}${tap}${RESET}..."
+  brew tap "$tap" 2>/dev/null || true
+  step "Installing ${CYAN}${name}${RESET}..."
+  brew install "$name"
+  info "$name installed"
+}
+
 _install_pi_agent() {
   if command -v pi &>/dev/null; then
     dim "  [installed]  pi-coding-agent"
@@ -860,6 +873,8 @@ cmd_setup() {
       "fzf:fzf:formula"
       "fd:fd:formula"
       "lynx:lynx:formula"
+      "zathura:zathura:tap(homebrew-zathura/zathura)"
+      "zathura-pdf-poppler:zathura:tap(homebrew-zathura/zathura)"
     )
     local entry name binary kind
     for entry in "${tools[@]}"; do
@@ -1054,6 +1069,8 @@ cmd_setup() {
   _install_brew_formula fzf
   _install_brew_formula fd
   _install_brew_formula lynx
+  _install_brew_tap_formula homebrew-zathura/zathura zathura
+  _install_brew_tap_formula homebrew-zathura/zathura zathura-pdf-poppler
   _install_pi_agent
 
   echo ""
@@ -2440,6 +2457,9 @@ cmd_test() {
 
   # S35: setup --plan mentions lynx
   _t_grep "S35 setup --plan mentions lynx" "lynx" cmd_setup --plan
+
+  # S36: setup --plan mentions zathura
+  _t_grep "S36 setup --plan mentions zathura" "zathura" cmd_setup --plan
 
   # S31: setup --plan mentions nvim config
   _t_grep "S31 setup --plan mentions nvim config" "nvim config" cmd_setup --plan
