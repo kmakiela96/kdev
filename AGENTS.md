@@ -9,6 +9,14 @@ Manages parallel git worktrees with tmux sessions. Each worktree gets a
 `Ctrl-a` toggles persistent nav mode (vim hjkl), `Ctrl-b` is one-shot prefix
 for structural commands.
 
+**Session model (browser-tab style):**
+- Each Alacritty window gets its own tmux session (`repo`, `repo_2`, ...)
+- Each worktree = one tmux window (tab) in a session
+- A worktree can only be open in one session at a time
+- Running `kdev dev` from inside tmux adds tabs to the current session
+- Running from a new terminal creates a new session
+- Opening an already-open worktree from another terminal errors out
+
 Also in the repo: `skills/`, `extensions/`,
 `rules/`, `global-agents.md`, `README.md`. `.ck` (search index) is gitignored.
 
@@ -41,7 +49,7 @@ Before every commit:
 1. **Constants** — `VERSION`, `WORKTREES_DIR`, color vars
 2. **Helpers** — `die`, `_err`, `warn`, `info`, `dim`, `step`
 3. **Git helpers** — `_find_repo_root`, `_git_default_branch`, `_git_is_dirty`, `_ensure_gitignore`
-4. **tmux helpers** — `_tmux_session_name`, `_tmux_attach_or_switch`
+4. **tmux helpers** — `_tmux_session_name`, `_tmux_repo_sessions`, `_tmux_find_worktree_session`, `_tmux_next_session_name`, `_tmux_attach_or_switch`
 5. **Config generators** — `_tmux_conf_content`, `_alacritty_conf_content`
 6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_write_alacritty_conf`, `_install_lf_config`, `_install_tmux_resurrect`, `_install_skills`, `_install_extensions`, `_install_pi_package`, `_ensure_pi_fff_override`, `_shell_rc_file`, `_install_global_agents_md`
 7. **Subcommand: setup** — `cmd_setup`

@@ -164,7 +164,7 @@ kdev dev <name> [--from <ref>]
 
 1. Creates `.worktrees/<name>/` as a git worktree on branch `<name>`
 2. Adds `.worktrees` to `.gitignore`
-3. Creates a tmux session (named after the repo) with a 3-pane layout:
+3. Creates a tmux session with a 3-pane layout:
 
 ```
 ┌──────────────────┬──────────────────┐
@@ -175,6 +175,13 @@ kdev dev <name> [--from <ref>]
 │                  │  (bottom-right)  │
 └──────────────────┴──────────────────┘
 ```
+
+**Session model (browser-tab style):**
+- Each terminal window gets its own tmux session (named `repo`, `repo_2`, ...)
+- Each worktree becomes a tab (tmux window) in the session
+- A worktree can only be open in one session at a time
+- Opening the same worktree from another terminal switches you to where it's already open
+- Running `kdev dev` from inside tmux adds tabs to the current session
 
 If the worktree already exists, just attaches/switches to the session.
 
@@ -201,6 +208,12 @@ kdev launch <name>
 Opens the tmux session for an existing worktree. Fails if the worktree
 doesn't exist — use `dev` to create one.
 
+If the worktree is already open in another terminal, you'll get an error:
+```
+✗ Worktree 'feature-auth' is already open in session 'my-project' (another terminal).
+  Switch to that terminal, or close the window there first.
+```
+
 ### `list` — Show Worktrees
 
 ```bash
@@ -210,7 +223,7 @@ kdev list
 Shows all worktrees with branch, dirty status, and tmux window state:
 
 ```
-  my-project worktrees:  (session: my-project)
+  my-project worktrees:  (prefix: my-project)
 
   NAME                 BRANCH               STATUS     TMUX
   ────                 ──────               ──────     ────
@@ -289,7 +302,8 @@ The status bar shows a yellow **NAV** indicator when nav mode is active.
 
 ## Persistence
 
-- tmux sessions survive terminal close — reattach with `tmux attach`
+- tmux sessions survive terminal close — reopen with `kdev dev <name>` or `kdev launch <name>`
+- Each terminal window gets its own session; closing and re-running kdev creates a new one
 - tmux-resurrect saves/restores sessions across tmux server restarts:
   - `Ctrl-b Ctrl-s` to save
   - `Ctrl-b Ctrl-r` to restore
@@ -349,9 +363,10 @@ These are complementary:
 kdev --test
 ```
 
-101 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
+108 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
 dev/launch/list/delete/here commands (including broken worktree repair), tmux
-layout, setup plan (including skills, extensions, and PI_FFF_MODE install), and meta flags.
+layout and session isolation (browser-tab model, max-one-window constraint),
+setup plan (including skills, extensions, and PI_FFF_MODE install), and meta flags.
 
 ## License
 

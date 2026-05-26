@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.21.0"
+readonly VERSION="2.22.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -158,14 +158,54 @@ _tmux_session_name() {
   echo "$name"
 }
 
+# List all kdev sessions for a repo prefix (e.g. "myrepo", "myrepo_2", ...)
+_tmux_repo_sessions() {
+  local prefix="$1"
+  tmux list-sessions -F '#{session_name}' 2>/dev/null \
+    | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true
+}
+
+# Find which session (if any) contains a window named $window_name.
+# Prints "session_name" on success, returns 1 if not found.
+_tmux_find_worktree_session() {
+  local prefix="$1" window_name="$2"
+  local sess
+  while IFS= read -r sess; do
+    [[ -z "$sess" ]] && continue
+    if tmux list-windows -t "$sess" -F '#{window_name}' 2>/dev/null \
+         | awk -v w="$window_name" '$0==w{found=1; exit} END{exit !found}'; then
+      echo "$sess"
+      return 0
+    fi
+  done < <(_tmux_repo_sessions "$prefix")
+  return 1
+}
+
+# Get next available session name for a repo.
+_tmux_next_session_name() {
+  local prefix="$1"
+  if ! tmux has-session -t "$prefix" 2>/dev/null; then
+    echo "$prefix"
+    return
+  fi
+  local i=2
+  while tmux has-session -t "${prefix}_${i}" 2>/dev/null; do
+    ((i++)) || true
+  done
+  echo "${prefix}_${i}"
+}
+
+# Attach (outside tmux) or switch-client (inside tmux) to a session.
 _tmux_attach_or_switch() {
-  local session="$1"
+  local session="$1" window="${2:-}"
   if [[ -n "${KDEV_TEST_NO_ATTACH:-}" ]]; then
     return 0
   fi
   if [[ -n "${TMUX:-}" ]]; then
     tmux switch-client -t "$session"
+    [[ -n "$window" ]] && tmux select-window -t "${session}:${window}"
   else
+    [[ -n "$window" ]] && tmux select-window -t "${session}:${window}"
     tmux attach -t "$session"
   fi
 }
@@ -1178,40 +1218,69 @@ _setup_dev_layout() {
 
 # Shared logic for dev and launch: create tmux session/window with layout,
 # or switch to it if it already exists.
+# Each worktree can be open in at most one session. Each Alacritty window
+# gets its own independent session (browser-tab model).
 _launch_session() {
   local repo_root="$1" name="$2" wt_dir="$3"
 
   command -v tmux &>/dev/null || die "tmux not found. Run: ${CYAN}$SCRIPT_NAME setup${RESET}"
 
-  local session_name window_name
-  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
-  window_name="$name"
-
-  if tmux has-session -t "$session_name" 2>/dev/null; then
-    if tmux list-windows -t "$session_name" -F '#{window_name}' 2>/dev/null \
-         | grep -qx "$window_name"; then
-      info "Switching to ${BOLD}${session_name}:${window_name}${RESET}"
-    else
-      tmux new-window -t "$session_name:" -n "$window_name" -c "$wt_dir"
-      _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
-      info "Created window ${BOLD}${session_name}:${window_name}${RESET}"
-    fi
-  else
-    tmux new-session -d -s "$session_name" -n "$window_name" -c "$wt_dir" \
-         -x "${COLUMNS:-220}" -y "${LINES:-50}"
-    _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
-    info "Started session ${BOLD}${session_name}${RESET} window ${BOLD}${window_name}${RESET}"
-  fi
-
-  # Ensure kdev tmux config is active on the running server — covers servers
-  # started before `kdev setup` wrote the config.
+  # Ensure kdev tmux config is active on the running server
   local _kdev_conf="$HOME/.config/tmux/tmux.conf"
   if [[ -f "$_kdev_conf" ]]; then
     tmux source-file "$_kdev_conf" 2>/dev/null || true
   fi
 
-  tmux select-window -t "$session_name:$window_name"
-  _tmux_attach_or_switch "$session_name"
+  local prefix window_name
+  prefix="$(_tmux_session_name "$(basename "$repo_root")")"
+  window_name="$name"
+
+  # 1. Check if worktree is already open in any session for this repo
+  local existing_session
+  if existing_session="$(_tmux_find_worktree_session "$prefix" "$window_name")"; then
+    # Already open — check if it's the current session (inside tmux)
+    if [[ -n "${TMUX:-}" ]]; then
+      local cur_session
+      cur_session="$(tmux display-message -p '#{session_name}' 2>/dev/null)"
+      if [[ "$cur_session" == "$existing_session" ]]; then
+        info "Switching to ${BOLD}${existing_session}:${window_name}${RESET}"
+        [[ -z "${KDEV_TEST_NO_ATTACH:-}" ]] && \
+          tmux select-window -t "${existing_session}:${window_name}"
+        return 0
+      fi
+    fi
+    # Worktree open in another session — check if that session has clients
+    local attached_clients
+    attached_clients="$(tmux display-message -t "$existing_session" -p '#{session_attached}' 2>/dev/null || echo "0")"
+    if [[ "$attached_clients" != "0" ]]; then
+      # Another terminal has it open — refuse
+      die "Worktree '${name}' is already open in session '${existing_session}' (another terminal).\n  Switch to that terminal, or close the window there first."
+    fi
+    # Session exists but stale (0 clients) — reattach to it
+    info "Reattaching to ${BOLD}${existing_session}:${window_name}${RESET}"
+    _tmux_attach_or_switch "$existing_session" "$window_name"
+    return 0
+  fi
+
+  # 2. Worktree not open anywhere — create it
+  if [[ -n "${TMUX:-}" ]] && [[ -z "${KDEV_TEST_NO_ATTACH:-}" ]]; then
+    # Inside tmux — add window to current session
+    local cur_session
+    cur_session="$(tmux display-message -p '#{session_name}')"
+    tmux new-window -t "$cur_session:" -n "$window_name" -c "$wt_dir"
+    _setup_dev_layout "$cur_session" "$window_name" "$wt_dir"
+    info "Created window ${BOLD}${cur_session}:${window_name}${RESET}"
+    tmux select-window -t "${cur_session}:${window_name}"
+  else
+    # Outside tmux — create a new session
+    local session_name
+    session_name="$(_tmux_next_session_name "$prefix")"
+    tmux new-session -d -s "$session_name" -n "$window_name" -c "$wt_dir" \
+         -x "${COLUMNS:-220}" -y "${LINES:-50}"
+    _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
+    info "Started session ${BOLD}${session_name}${RESET} window ${BOLD}${window_name}${RESET}"
+    _tmux_attach_or_switch "$session_name" "$window_name"
+  fi
 }
 
 # ─── Subcommand: dev ─────────────────────────────────────────────────────────
@@ -1390,8 +1459,8 @@ cmd_list() {
   repo_root="$(_find_repo_root)" || die "Not inside a git repository."
 
   local wt_base="$repo_root/$WORKTREES_DIR"
-  local session_name
-  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
+  local prefix
+  prefix="$(_tmux_session_name "$(basename "$repo_root")")"
 
   if [[ ! -d "$wt_base" ]] || [[ -z "$(ls -A "$wt_base" 2>/dev/null)" ]]; then
     echo ""
@@ -1399,16 +1468,20 @@ cmd_list() {
     return 0
   fi
 
-  # Gather tmux window names
+  # Gather tmux window names from ALL sessions for this repo
   local -a tmux_windows=()
-  if command -v tmux &>/dev/null && tmux has-session -t "$session_name" 2>/dev/null; then
-    while IFS= read -r win; do
-      tmux_windows+=("$win")
-    done < <(tmux list-windows -t "$session_name" -F '#{window_name}:#{window_active}' 2>/dev/null)
+  if command -v tmux &>/dev/null; then
+    local _sess
+    while IFS= read -r _sess; do
+      [[ -z "$_sess" ]] && continue
+      while IFS= read -r win; do
+        tmux_windows+=("$win")
+      done < <(tmux list-windows -t "$_sess" -F '#{window_name}:#{window_active}' 2>/dev/null)
+    done < <(_tmux_repo_sessions "$prefix")
   fi
 
   echo ""
-  echo -e "  ${BOLD}$(basename "$repo_root")${RESET} worktrees:  ${DIM}(session: ${session_name})${RESET}"
+  echo -e "  ${BOLD}$(basename "$repo_root")${RESET} worktrees:  ${DIM}(prefix: ${prefix})${RESET}"
   echo ""
   printf "  ${DIM}%-20s %-20s %-10s %-10s${RESET}\n" "NAME" "BRANCH" "STATUS" "TMUX"
   printf "  ${DIM}%-20s %-20s %-10s %-10s${RESET}\n" "────" "──────" "──────" "────"
@@ -1481,18 +1554,18 @@ cmd_delete() {
   local wt_valid=true
   _git_worktree_valid "$wt_dir" || wt_valid=false
 
-  local session_name
-  session_name="$(_tmux_session_name "$(basename "$repo_root")")"
+  local prefix
+  prefix="$(_tmux_session_name "$(basename "$repo_root")")"
 
-  # Kill tmux window if open
-  if command -v tmux &>/dev/null && tmux has-session -t "$session_name" 2>/dev/null; then
-    if tmux list-windows -t "$session_name" -F '#{window_name}' 2>/dev/null \
-         | grep -qx "$name"; then
+  # Kill tmux window if open (search ALL sessions for this repo)
+  if command -v tmux &>/dev/null; then
+    local _wt_session
+    if _wt_session="$(_tmux_find_worktree_session "$prefix" "$name")"; then
       if [[ "$force" != true ]]; then
-        die "tmux window '${name}' is still open.\n  Close it first, or use ${CYAN}--force${RESET}."
+        die "tmux window '${name}' is still open in session '${_wt_session}'.\n  Close it first, or use ${CYAN}--force${RESET}."
       fi
-      step "Killing tmux window ${BOLD}${session_name}:${name}${RESET}..."
-      tmux kill-window -t "$session_name:$name" 2>/dev/null || true
+      step "Killing tmux window ${BOLD}${_wt_session}:${name}${RESET}..."
+      tmux kill-window -t "$_wt_session:$name" 2>/dev/null || true
     fi
   fi
 
@@ -2239,6 +2312,102 @@ cmd_test() {
       mv "$t7_backup" "$t7_conf"
     fi
 
+    # T8: independent sessions — second dev from outside tmux creates new session
+    local t8_repo="$TMPBASE/t8-repo"
+    mkdir -p "$t8_repo"
+    git -C "$t8_repo" init --quiet
+    git -C "$t8_repo" commit --allow-empty -m "initial" --quiet
+    (cd "$t8_repo" && cmd_dev "wt-a") &>/dev/null
+    (cd "$t8_repo" && cmd_dev "wt-b") &>/dev/null
+    local t8_prefix
+    t8_prefix="$(_tmux_session_name "t8-repo")"
+    # With KDEV_TEST_NO_ATTACH, both worktrees go into the base session
+    # (since we're never "inside tmux" during tests)
+    local t8_sessions
+    t8_sessions="$(_tmux_repo_sessions "$t8_prefix")"
+    if echo "$t8_sessions" | awk -v p="$t8_prefix" 'BEGIN{found=0} $0==p{found=1} END{exit !found}'; then
+      _t_pass "T8 dev creates session with repo prefix"
+    else
+      _t_fail "T8 dev creates session with repo prefix — got '$t8_sessions'"
+    fi
+
+    # T9: worktree is only open in one session (max-one-window constraint)
+    local t9_found
+    t9_found="$(_tmux_find_worktree_session "$t8_prefix" "wt-a")"
+    if [[ -n "$t9_found" ]]; then
+      _t_pass "T9 _tmux_find_worktree_session finds open worktree"
+    else
+      _t_fail "T9 _tmux_find_worktree_session finds open worktree"
+    fi
+
+    # T10: _tmux_find_worktree_session returns empty for non-open worktree
+    if ! _tmux_find_worktree_session "$t8_prefix" "nonexistent" &>/dev/null; then
+      _t_pass "T10 _tmux_find_worktree_session returns 1 for missing window"
+    else
+      _t_fail "T10 _tmux_find_worktree_session returns 1 for missing window"
+    fi
+
+    # T11: _tmux_next_session_name increments correctly
+    # After T8 created t8-repo and t8-repo_2 (one per cmd_dev), next is _3
+    local t11_next
+    t11_next="$(_tmux_next_session_name "$t8_prefix")"
+    if [[ "$t11_next" == "${t8_prefix}_3" ]]; then
+      _t_pass "T11 _tmux_next_session_name increments past existing sessions"
+    else
+      _t_fail "T11 _tmux_next_session_name increments past existing — got '$t11_next'"
+    fi
+
+    # T12: second dev for same worktree reuses existing window (no duplicate)
+    (cd "$t8_repo" && cmd_dev "wt-a") &>/dev/null
+    local t12_count=0
+    local _t12_sess
+    while IFS= read -r _t12_sess; do
+      [[ -z "$_t12_sess" ]] && continue
+      if tmux list-windows -t "$_t12_sess" -F '#{window_name}' 2>/dev/null \
+           | awk -v w="wt-a" '$0==w{found=1} END{exit !found}'; then
+        ((t12_count++)) || true
+      fi
+    done < <(_tmux_repo_sessions "$t8_prefix")
+    if [[ "$t12_count" == "1" ]]; then
+      _t_pass "T12 worktree opens in max one window across sessions"
+    else
+      _t_fail "T12 worktree opens in max one window — found in $t12_count sessions"
+    fi
+
+    # T13: opening worktree that's in a session with attached clients errors
+    local t13_repo="$TMPBASE/t13-repo"
+    mkdir -p "$t13_repo"
+    git -C "$t13_repo" init --quiet
+    git -C "$t13_repo" commit --allow-empty -m "initial" --quiet
+    local t13_prefix
+    t13_prefix="$(_tmux_session_name "t13-repo")"
+    # Create session with worktree (KDEV_TEST_NO_ATTACH skips attach)
+    (cd "$t13_repo" && cmd_dev "occupied-wt") &>/dev/null
+    # Attach a control-mode client (no TTY needed) to simulate another terminal
+    (sleep 10 | tmux -C attach -t "$t13_prefix") &>/dev/null &
+    local t13_pid=$!
+    sleep 0.3
+    # Now try to open same worktree — should fail with "already open"
+    local t13_err
+    if ! t13_err="$(cd "$t13_repo" && KDEV_TEST_NO_ATTACH="" _launch_session "$t13_repo" "occupied-wt" "$t13_repo/$WORKTREES_DIR/occupied-wt" 2>&1)"; then
+      if echo "$t13_err" | awk '/already open/{found=1} END{exit !found}'; then
+        _t_pass "T13 errors when worktree open in another terminal"
+      else
+        _t_fail "T13 errors when worktree open in another terminal — wrong msg: $t13_err"
+      fi
+    else
+      _t_fail "T13 errors when worktree open in another terminal — did not error"
+    fi
+    kill "$t13_pid" 2>/dev/null || true
+    wait "$t13_pid" 2>/dev/null || true
+    tmux kill-session -t "$t13_prefix" 2>/dev/null || true
+
+    # Cleanup T8-T12
+    while IFS= read -r _t12_sess; do
+      [[ -z "$_t12_sess" ]] && continue
+      tmux kill-session -t "$_t12_sess" 2>/dev/null || true
+    done < <(_tmux_repo_sessions "$t8_prefix")
+
     tmux kill-session -t "$tmux_session" 2>/dev/null || true
   else
     _section "T — tmux layout (skipped — tmux not installed)"
@@ -2249,6 +2418,12 @@ cmd_test() {
     _t_skip "T5 launch works for existing worktree"
     _t_skip "T6 launch fails for non-existent worktree"
     _t_skip "T7 launch sources kdev tmux config"
+    _t_skip "T8 dev creates session with repo prefix"
+    _t_skip "T9 _tmux_find_worktree_session finds open worktree"
+    _t_skip "T10 _tmux_find_worktree_session returns 1 for missing window"
+    _t_skip "T11 _tmux_next_session_name increments past existing sessions"
+    _t_skip "T12 worktree opens in max one window across sessions"
+    _t_skip "T13 errors when worktree open in another terminal"
   fi
 
   # ─── S — Setup ───────────────────────────────────────────────────────
