@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.22.0"
+readonly VERSION="2.22.1"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2665,6 +2665,15 @@ cmd_test() {
   # S34: _install_nvim_config says up to date on second run
   _t_grep "S34 _install_nvim_config says up to date on second run" "up to date" \
     bash -c "export HOME='$TMPBASE/s34_home'; mkdir -p \"\$HOME\"; source '$0'; _install_nvim_config; _install_nvim_config"
+
+  # S37: fzf.lua passes nil context to vim.lsp.buf.references
+  # Regression: passing { on_list = fn } as 1st arg made Neovim treat it as
+  # LSP context and try to serialise the function over RPC.
+  if grep -qF 'vim.lsp.buf.references(nil, opts)' "$TMPBASE/s32_home/.config/nvim/lua/plugins/fzf.lua"; then
+    _t_pass "S37 fzf.lua calls references with nil context"
+  else
+    _t_fail "S37 fzf.lua calls references with nil context"
+  fi
 
   # ─── V — Meta ────────────────────────────────────────────────────────
   _section "H — Here command"

@@ -8,7 +8,7 @@ return {
 
       local function lsp_tabedit(lsp_fn)
         return function()
-          vim.lsp.buf[lsp_fn]({
+          local opts = {
             on_list = function(list)
               if #list.items == 1 then
                 local item = list.items[1]
@@ -22,7 +22,15 @@ return {
                 })
               end
             end,
-          })
+          }
+          -- vim.lsp.buf.references signature is (context, opts); passing opts
+          -- as the first arg makes Neovim try to serialise on_list (a fn) as
+          -- LSP context → "Cannot serialise function" RPC error.
+          if lsp_fn == "references" then
+            vim.lsp.buf.references(nil, opts)
+          else
+            vim.lsp.buf[lsp_fn](opts)
+          end
         end
       end
 
