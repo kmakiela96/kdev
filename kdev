@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.22.1"
+readonly VERSION="2.23.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -262,6 +262,9 @@ bind -T nav L swap-pane -d -t '{right-of}' \; switch-client -T nav
 
 # Nav: zoom toggle (f) — sticky
 bind -T nav f resize-pane -Z \; switch-client -T nav
+
+# Nav: normalize layout (n) — 50% left, 25%/25% right — sticky
+bind -T nav n set-window-option main-pane-width "50%" \; select-layout main-vertical \; switch-client -T nav
 
 # Nav: kill pane (d) — sticky
 bind -T nav d kill-pane \; switch-client -T nav
@@ -1206,10 +1209,6 @@ _setup_dev_layout() {
   tmux send-keys -t "$p3" "lf" Enter
   tmux select-pane -t "$p3" -T "lf"
 
-  # Enforce proportions: 50% left, 25%/25% right — re-applied on every resize
-  tmux set-window-option -t "$session:$window" main-pane-width "50%"
-  tmux select-layout -t "$session:$window" main-vertical
-
   # Focus the agent pane
   tmux select-pane -t "$p1"
 }
@@ -1945,6 +1944,13 @@ cmd_test() {
     _t_pass "C12 tmux conf includes nav mode terminal pane binding"
   else
     _t_fail "C12 tmux conf includes nav mode terminal pane binding"
+  fi
+
+  # C13: tmux conf includes nav mode normalize layout (n)
+  if echo "$tmux_content" | grep -q 'bind -T nav n set-window-option main-pane-width'; then
+    _t_pass "C13 tmux conf includes nav mode normalize layout binding"
+  else
+    _t_fail "C13 tmux conf includes nav mode normalize layout binding"
   fi
 
   # C11: tmux conf includes NAV indicator in status bar
