@@ -182,6 +182,20 @@ kdev dev <name> [--from <ref>]
 - A worktree can only be open in one session at a time
 - Opening the same worktree from another terminal switches you to where it's already open
 - Running `kdev dev` from inside tmux adds tabs to the current session
+- Sessions are tied to the repo's **full path**, not just its folder name, so two
+  clones sharing a folder name (e.g. `~/a/my-project` and `~/b/my-project`) never
+  collide. The second one gets `my-project_2` and kdev asks first:
+
+```
+warn: Session 'my-project' has the same name but a different repo:
+    /Users/you/a/my-project
+  You are in:
+    /Users/you/b/my-project
+  Create a separate session for this repo? [y/N]:
+```
+
+  Answer `n` and nothing is created. Set `KDEV_ASSUME_YES=1` to skip the prompt
+  in scripts.
 
 If the worktree already exists, just attaches/switches to the session.
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.23.0"
+readonly VERSION="2.24.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -34,6 +34,13 @@ _confirm() {
   printf "%s [y/N]: " "$1"
   read -r answer
   [[ "$answer" =~ ^[Yy]$ ]]
+}
+
+# Whether interactive confirmation prompts should be shown. Non-interactive
+# callers (scripts, tests) proceed without asking unless KDEV_FORCE_PROMPT is set.
+_confirm_enabled() {
+  [[ -n "${KDEV_FORCE_PROMPT:-}" ]] && return 0
+  [[ -t 0 && -z "${KDEV_ASSUME_YES:-}" ]]
 }
 
 # Resolve the absolute path of this script, following symlinks.
@@ -158,17 +165,50 @@ _tmux_session_name() {
   echo "$name"
 }
 
-# List all kdev sessions for a repo prefix (e.g. "myrepo", "myrepo_2", ...)
+# Two different repos can share a basename (e.g. two checkouts of the same
+# project in different parent dirs), so the session name alone cannot identify
+# a repo. Each kdev session stores its repo root in @kdev_repo.
+_tmux_session_repo() {
+  tmux show-options -qv -t "$1" @kdev_repo 2>/dev/null || true
+}
+
+_tmux_tag_session() {
+  tmux set-option -t "$1" @kdev_repo "$2" 2>/dev/null || true
+}
+
+# List all kdev sessions for a repo prefix (e.g. "myrepo", "myrepo_2", ...).
+# With $2 set, sessions tagged for a different repo root are excluded.
+# Untagged sessions always match (sessions created before tagging existed).
 _tmux_repo_sessions() {
-  local prefix="$1"
-  tmux list-sessions -F '#{session_name}' 2>/dev/null \
-    | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true
+  local prefix="$1" repo_root="${2:-}"
+  local sess sess_repo
+  while IFS= read -r sess; do
+    [[ -z "$sess" ]] && continue
+    if [[ -n "$repo_root" ]]; then
+      sess_repo="$(_tmux_session_repo "$sess")"
+      [[ -n "$sess_repo" && "$sess_repo" != "$repo_root" ]] && continue
+    fi
+    echo "$sess"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null \
+             | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true)
+}
+
+# List prefix-matching sessions that belong to a *different* repo root.
+_tmux_foreign_sessions() {
+  local prefix="$1" repo_root="$2"
+  local sess sess_repo
+  while IFS= read -r sess; do
+    [[ -z "$sess" ]] && continue
+    sess_repo="$(_tmux_session_repo "$sess")"
+    [[ -n "$sess_repo" && "$sess_repo" != "$repo_root" ]] && echo "$sess"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null \
+             | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true)
 }
 
 # Find which session (if any) contains a window named $window_name.
 # Prints "session_name" on success, returns 1 if not found.
 _tmux_find_worktree_session() {
-  local prefix="$1" window_name="$2"
+  local prefix="$1" window_name="$2" repo_root="${3:-}"
   local sess
   while IFS= read -r sess; do
     [[ -z "$sess" ]] && continue
@@ -177,7 +217,7 @@ _tmux_find_worktree_session() {
       echo "$sess"
       return 0
     fi
-  done < <(_tmux_repo_sessions "$prefix")
+  done < <(_tmux_repo_sessions "$prefix" "$repo_root")
   return 1
 }
 
@@ -1236,7 +1276,7 @@ _launch_session() {
 
   # 1. Check if worktree is already open in any session for this repo
   local existing_session
-  if existing_session="$(_tmux_find_worktree_session "$prefix" "$window_name")"; then
+  if existing_session="$(_tmux_find_worktree_session "$prefix" "$window_name" "$repo_root")"; then
     # Already open — check if it's the current session (inside tmux)
     if [[ -n "${TMUX:-}" ]]; then
       local cur_session
@@ -1264,18 +1304,45 @@ _launch_session() {
   # 2. Worktree not open anywhere — create it
   if [[ -n "${TMUX:-}" ]] && [[ -z "${KDEV_TEST_NO_ATTACH:-}" ]]; then
     # Inside tmux — add window to current session
-    local cur_session
+    local cur_session cur_repo
     cur_session="$(tmux display-message -p '#{session_name}')"
+    cur_repo="$(_tmux_session_repo "$cur_session")"
+    if [[ -n "$cur_repo" && "$cur_repo" != "$repo_root" ]]; then
+      warn "Session '${cur_session}' belongs to a different repo:\n    ${cur_repo}\n  You are in:\n    ${repo_root}"
+      if _confirm_enabled; then
+        _confirm "  Add '${name}' as a tab in that session anyway?" || {
+          dim "  Aborted. Open a new terminal for a separate session."
+          return 0
+        }
+      fi
+    fi
+    [[ -z "$cur_repo" ]] && _tmux_tag_session "$cur_session" "$repo_root"
     tmux new-window -t "$cur_session:" -n "$window_name" -c "$wt_dir"
     _setup_dev_layout "$cur_session" "$window_name" "$wt_dir"
     info "Created window ${BOLD}${cur_session}:${window_name}${RESET}"
     tmux select-window -t "${cur_session}:${window_name}"
   else
-    # Outside tmux — create a new session
+    # Outside tmux — create a new session. Sessions matching this prefix may
+    # belong to a different repo that happens to share the same folder name.
+    local -a _foreign=()
+    local _f
+    while IFS= read -r _f; do
+      [[ -n "$_f" ]] && _foreign+=("$_f")
+    done < <(_tmux_foreign_sessions "$prefix" "$repo_root")
+    if [[ ${#_foreign[@]} -gt 0 ]]; then
+      warn "Session '${_foreign[0]}' has the same name but a different repo:\n    $(_tmux_session_repo "${_foreign[0]}")\n  You are in:\n    ${repo_root}"
+      if _confirm_enabled; then
+        _confirm "  Create a separate session for this repo?" || {
+          dim "  Aborted. No session created."
+          return 0
+        }
+      fi
+    fi
     local session_name
     session_name="$(_tmux_next_session_name "$prefix")"
     tmux new-session -d -s "$session_name" -n "$window_name" -c "$wt_dir" \
          -x "${COLUMNS:-220}" -y "${LINES:-50}"
+    _tmux_tag_session "$session_name" "$repo_root"
     _setup_dev_layout "$session_name" "$window_name" "$wt_dir"
     info "Started session ${BOLD}${session_name}${RESET} window ${BOLD}${window_name}${RESET}"
     _tmux_attach_or_switch "$session_name" "$window_name"
@@ -1476,7 +1543,7 @@ cmd_list() {
       while IFS= read -r win; do
         tmux_windows+=("$win")
       done < <(tmux list-windows -t "$_sess" -F '#{window_name}:#{window_active}' 2>/dev/null)
-    done < <(_tmux_repo_sessions "$prefix")
+    done < <(_tmux_repo_sessions "$prefix" "$repo_root")
   fi
 
   echo ""
@@ -1559,7 +1626,7 @@ cmd_delete() {
   # Kill tmux window if open (search ALL sessions for this repo)
   if command -v tmux &>/dev/null; then
     local _wt_session
-    if _wt_session="$(_tmux_find_worktree_session "$prefix" "$name")"; then
+    if _wt_session="$(_tmux_find_worktree_session "$prefix" "$name" "$repo_root")"; then
       if [[ "$force" != true ]]; then
         die "tmux window '${name}' is still open in session '${_wt_session}'.\n  Close it first, or use ${CYAN}--force${RESET}."
       fi
@@ -2408,6 +2475,94 @@ cmd_test() {
     wait "$t13_pid" 2>/dev/null || true
     tmux kill-session -t "$t13_prefix" 2>/dev/null || true
 
+    # T14: sessions are tagged with their repo root
+    local t14_tag
+    t14_tag="$(_tmux_session_repo "$t8_prefix")"
+    if [[ "$t14_tag" == "$t8_repo" ]]; then
+      _t_pass "T14 session tagged with repo root"
+    else
+      _t_fail "T14 session tagged with repo root — got '$t14_tag'"
+    fi
+
+    # T15-T17: two repos with the same basename in different parent dirs
+    local t15_a="$TMPBASE/t15a/dupe-repo"
+    local t15_b="$TMPBASE/t15b/dupe-repo"
+    local t15_prefix
+    t15_prefix="$(_tmux_session_name "dupe-repo")"
+    local _r
+    for _r in "$t15_a" "$t15_b"; do
+      mkdir -p "$_r"
+      git -C "$_r" init --quiet
+      git -C "$_r" commit --allow-empty -m "initial" --quiet
+    done
+    (cd "$t15_a" && cmd_dev "shared-name") &>/dev/null
+    local t15_err t15_rc=0
+    t15_err="$(cd "$t15_b" && KDEV_ASSUME_YES=1 cmd_dev "shared-name" 2>&1)" || t15_rc=$?
+    if [[ "$t15_rc" == "0" ]]; then
+      _t_pass "T15 same worktree name in same-basename repos does not error"
+    else
+      _t_fail "T15 same worktree name in same-basename repos — failed: $t15_err"
+    fi
+
+    # T16: each repo got its own session
+    local t16_a t16_b
+    t16_a="$(_tmux_find_worktree_session "$t15_prefix" "shared-name" "$t15_a")"
+    t16_b="$(_tmux_find_worktree_session "$t15_prefix" "shared-name" "$t15_b")"
+    if [[ -n "$t16_a" && -n "$t16_b" && "$t16_a" != "$t16_b" ]]; then
+      _t_pass "T16 same-basename repos get distinct sessions"
+    else
+      _t_fail "T16 same-basename repos get distinct sessions — a='$t16_a' b='$t16_b'"
+    fi
+
+    # T17: _tmux_repo_sessions excludes sessions tagged for another repo
+    local t17_list
+    t17_list="$(_tmux_repo_sessions "$t15_prefix" "$t15_b")"
+    if echo "$t17_list" | awk -v s="$t16_a" '$0==s{found=1} END{exit !found}'; then
+      _t_fail "T17 _tmux_repo_sessions excludes foreign repo — got '$t17_list'"
+    else
+      _t_pass "T17 _tmux_repo_sessions excludes foreign repo"
+    fi
+
+    # T18: untagged sessions still match (backward compatibility)
+    local t18_sess="${t15_prefix}_99"
+    tmux new-session -d -s "$t18_sess" -n "legacy-wt" -c "$TMPBASE" 2>/dev/null || true
+    if _tmux_repo_sessions "$t15_prefix" "$t15_b" \
+         | awk -v s="$t18_sess" '$0==s{found=1} END{exit !found}'; then
+      _t_pass "T18 untagged sessions still match repo filter"
+    else
+      _t_fail "T18 untagged sessions still match repo filter"
+    fi
+
+    # T19: declining the prompt creates no session
+    local t19_repo="$TMPBASE/t19c/dupe-repo"
+    mkdir -p "$t19_repo"
+    git -C "$t19_repo" init --quiet
+    git -C "$t19_repo" commit --allow-empty -m "initial" --quiet
+    local t19_before t19_after
+    t19_before="$(_tmux_repo_sessions "$t15_prefix" | wc -l | tr -d ' ')"
+    (cd "$t19_repo" && KDEV_FORCE_PROMPT=1 cmd_dev "declined-wt" <<< "n") &>/dev/null || true
+    t19_after="$(_tmux_repo_sessions "$t15_prefix" | wc -l | tr -d ' ')"
+    if [[ "$t19_before" == "$t19_after" ]]; then
+      _t_pass "T19 declining prompt creates no session"
+    else
+      _t_fail "T19 declining prompt creates no session — $t19_before -> $t19_after"
+    fi
+
+    # T20: the collision prompt explains which repos are involved
+    local t20_out
+    t20_out="$(cd "$t19_repo" && KDEV_FORCE_PROMPT=1 cmd_dev "declined-wt" <<< "n" 2>&1)" || true
+    if echo "$t20_out" | awk '/different repo/{found=1} END{exit !found}'; then
+      _t_pass "T20 collision prompt names the conflicting repo"
+    else
+      _t_fail "T20 collision prompt names the conflicting repo — got: $t20_out"
+    fi
+
+    # Cleanup T15-T20
+    while IFS= read -r _r; do
+      [[ -z "$_r" ]] && continue
+      tmux kill-session -t "$_r" 2>/dev/null || true
+    done < <(_tmux_repo_sessions "$t15_prefix")
+
     # Cleanup T8-T12
     while IFS= read -r _t12_sess; do
       [[ -z "$_t12_sess" ]] && continue
@@ -2430,6 +2585,13 @@ cmd_test() {
     _t_skip "T11 _tmux_next_session_name increments past existing sessions"
     _t_skip "T12 worktree opens in max one window across sessions"
     _t_skip "T13 errors when worktree open in another terminal"
+    _t_skip "T14 session tagged with repo root"
+    _t_skip "T15 same worktree name in same-basename repos does not error"
+    _t_skip "T16 same-basename repos get distinct sessions"
+    _t_skip "T17 _tmux_repo_sessions excludes foreign repo"
+    _t_skip "T18 untagged sessions still match repo filter"
+    _t_skip "T19 declining prompt creates no session"
+    _t_skip "T20 collision prompt names the conflicting repo"
   fi
 
   # ─── S — Setup ───────────────────────────────────────────────────────
