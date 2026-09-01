@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.24.0"
+readonly VERSION="2.24.1"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -303,8 +303,8 @@ bind -T nav L swap-pane -d -t '{right-of}' \; switch-client -T nav
 # Nav: zoom toggle (f) — sticky
 bind -T nav f resize-pane -Z \; switch-client -T nav
 
-# Nav: normalize layout (n) — 50% left, 25%/25% right — sticky
-bind -T nav n set-window-option main-pane-width "50%" \; select-layout main-vertical \; switch-client -T nav
+# Nav: normalize layout (n) — tiled grid at 4 panes, else 50% left / 25%/25% right — sticky
+bind -T nav n if-shell -F '#{==:#{window_panes},4}' 'select-layout tiled' 'set-window-option main-pane-width "50%" ; select-layout main-vertical' \; switch-client -T nav
 
 # Nav: kill pane (d) — sticky
 bind -T nav d kill-pane \; switch-client -T nav
@@ -2014,7 +2014,7 @@ cmd_test() {
   fi
 
   # C13: tmux conf includes nav mode normalize layout (n)
-  if echo "$tmux_content" | grep -q 'bind -T nav n set-window-option main-pane-width'; then
+  if echo "$tmux_content" | grep -q 'bind -T nav n if-shell'; then
     _t_pass "C13 tmux conf includes nav mode normalize layout binding"
   else
     _t_fail "C13 tmux conf includes nav mode normalize layout binding"
