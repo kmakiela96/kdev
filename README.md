@@ -387,7 +387,7 @@ completion, then surfaces its full log, exit code, and duration.
 kdev --test
 ```
 
-108 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
+131 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
 dev/launch/list/delete/here commands (including broken worktree repair), tmux
 layout and session isolation (browser-tab model, max-one-window constraint),
 setup plan (including skills, extensions, and PI_FFF_MODE install), and meta flags.

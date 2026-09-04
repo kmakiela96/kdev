@@ -43,6 +43,28 @@ _confirm_enabled() {
   [[ -t 0 && -z "${KDEV_ASSUME_YES:-}" ]]
 }
 
+# Pick an unused backup name for $1: <path>.bak, <path>.bak1, <path>.bak2...
+# Prints the name; does not move anything.
+_backup_path() {
+  local target="$1"
+  local backup="${target}.bak"
+  local n=1
+  while [[ -e "$backup" ]]; do
+    backup="${target}.bak${n}"
+    ((n++)) || true
+  done
+  echo "$backup"
+}
+
+# Move $1 aside to a free .bak name and report it.
+_backup_existing() {
+  local target="$1" label="${2:-$1}"
+  local backup
+  backup="$(_backup_path "$target")"
+  mv "$target" "$backup"
+  step "Backed up ${DIM}${label}${RESET} → ${DIM}$(basename "$backup")${RESET}"
+}
+
 # Resolve the absolute path of this script, following symlinks.
 _script_path() {
   local src="${BASH_SOURCE[0]:-$0}"
@@ -50,6 +72,9 @@ _script_path() {
   real="$(readlink -f "$src" 2>/dev/null)" || real="$src"
   echo "$real"
 }
+
+# Directory holding this script — source of bundled configs, skills, extensions.
+_kdev_home() { dirname "$(_script_path)"; }
 
 # ─── Git helpers ──────────────────────────────────────────────────────────────
 
@@ -189,8 +214,13 @@ _tmux_repo_sessions() {
       [[ -n "$sess_repo" && "$sess_repo" != "$repo_root" ]] && continue
     fi
     echo "$sess"
-  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-             | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true)
+  done < <(_tmux_prefix_sessions "$prefix")
+}
+
+# List every live session whose name is "<prefix>" or "<prefix>_<n>".
+_tmux_prefix_sessions() {
+  tmux list-sessions -F '#{session_name}' 2>/dev/null \
+    | awk -v p="$1" '$0==p || $0~"^"p"_[0-9]+$"' || true
 }
 
 # List prefix-matching sessions that belong to a *different* repo root.
@@ -201,8 +231,7 @@ _tmux_foreign_sessions() {
     [[ -z "$sess" ]] && continue
     sess_repo="$(_tmux_session_repo "$sess")"
     [[ -n "$sess_repo" && "$sess_repo" != "$repo_root" ]] && echo "$sess"
-  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null \
-             | awk -v p="$prefix" '$0==p || $0~"^"p"_[0-9]+$"' || true)
+  done < <(_tmux_prefix_sessions "$prefix")
 }
 
 # Find which session (if any) contains a window named $window_name.
@@ -589,16 +618,7 @@ _write_tmux_conf() {
   local old_conf="$HOME/.tmux.conf"
 
   # Back up ~/.tmux.conf so tmux reads the XDG-compliant location
-  if [[ -f "$old_conf" ]]; then
-    local backup="${old_conf}.bak"
-    local n=1
-    while [[ -f "$backup" ]]; do
-      backup="${old_conf}.bak${n}"
-      ((n++))
-    done
-    mv "$old_conf" "$backup"
-    step "Backed up ${DIM}~/.tmux.conf${RESET} → ${DIM}$(basename "$backup")${RESET}"
-  fi
+  [[ -f "$old_conf" ]] && _backup_existing "$old_conf" "~/.tmux.conf"
 
   mkdir -p "$conf_dir"
   local new_content
@@ -620,16 +640,7 @@ _write_alacritty_conf() {
     return 0
   fi
 
-  if [[ -f "$conf_file" ]]; then
-    local backup="${conf_file}.bak"
-    local n=1
-    while [[ -f "$backup" ]]; do
-      backup="${conf_file}.bak${n}"
-      ((n++))
-    done
-    mv "$conf_file" "$backup"
-    step "Backed up ${DIM}alacritty.toml${RESET} → ${DIM}$(basename "$backup")${RESET}"
-  fi
+  [[ -f "$conf_file" ]] && _backup_existing "$conf_file" "alacritty.toml"
 
   mkdir -p "$conf_dir"
   _alacritty_conf_content > "$conf_file"
@@ -638,7 +649,7 @@ _write_alacritty_conf() {
 
 _write_lazygit_conf() {
   local src
-  src="$(dirname "$(_script_path)")/.config/lazygit/config.yml"
+  src="$(_kdev_home)/.config/lazygit/config.yml"
 
   if [[ ! -f "$src" ]]; then
     warn "lazygit config not found at ${src} — skipping."
@@ -654,14 +665,7 @@ _write_lazygit_conf() {
   fi
 
   if [[ -f "$conf_file" ]] && ! grep -qF "managed by kdev" "$conf_file"; then
-    local backup="${conf_file}.bak"
-    local n=1
-    while [[ -f "$backup" ]]; do
-      backup="${conf_file}.bak${n}"
-      ((n++)) || true
-    done
-    mv "$conf_file" "$backup"
-    step "Backed up ${DIM}config.yml${RESET} → ${DIM}$(basename "$backup")${RESET}"
+    _backup_existing "$conf_file" "config.yml"
   fi
 
   mkdir -p "$conf_dir"
@@ -698,7 +702,7 @@ _append_zsh_completions() {
 
 _install_lf_config() {
   local lf_src
-  lf_src="$(dirname "$(_script_path)")/.config/lf"
+  lf_src="$(_kdev_home)/.config/lf"
 
   if [[ ! -d "$lf_src" ]]; then
     warn "lf config not found at ${lf_src} — skipping."
@@ -709,14 +713,7 @@ _install_lf_config() {
 
   # Back up existing config only if it wasn't deployed by kdev
   if [[ -d "$lf_dest" ]] && ! grep -qF "managed by kdev" "$lf_dest/lfrc" 2>/dev/null; then
-    local backup="${lf_dest}.bak"
-    local n=1
-    while [[ -d "$backup" ]]; do
-      backup="${lf_dest}.bak${n}"
-      ((n++))
-    done
-    mv "$lf_dest" "$backup"
-    step "Backed up ${DIM}~/.config/lf${RESET} → ${DIM}$(basename "$backup")${RESET}"
+    _backup_existing "$lf_dest" "~/.config/lf"
   fi
 
   mkdir -p "$lf_dest"
@@ -735,7 +732,7 @@ _install_lf_config() {
 
 _install_nvim_config() {
   local nvim_src
-  nvim_src="$(dirname "$(_script_path)")/.config/nvim"
+  nvim_src="$(_kdev_home)/.config/nvim"
 
   if [[ ! -d "$nvim_src" ]]; then
     warn "nvim config not found at ${nvim_src} — skipping."
@@ -746,14 +743,7 @@ _install_nvim_config() {
 
   # Back up existing config only if it wasn't deployed by kdev
   if [[ -d "$nvim_dest" ]] && ! grep -qF "managed by kdev" "$nvim_dest/init.lua" 2>/dev/null; then
-    local backup="${nvim_dest}.bak"
-    local n=1
-    while [[ -d "$backup" ]]; do
-      backup="${nvim_dest}.bak${n}"
-      ((n++)) || true
-    done
-    mv "$nvim_dest" "$backup"
-    step "Backed up ${DIM}~/.config/nvim${RESET} → ${DIM}$(basename "$backup")${RESET}"
+    _backup_existing "$nvim_dest" "~/.config/nvim"
   fi
 
   mkdir -p "$nvim_dest/lua/plugins"
@@ -786,20 +776,20 @@ _install_tmux_resurrect() {
 # Copy skills/ from the kdev repo into ~/.agents/skills/.
 # Each skill is a subdirectory containing SKILL.md. Existing skills with the
 # same name are overwritten so updates are picked up on re-run.
-_install_skills() {
-  local skills_src
-  skills_src="$(dirname "$(_script_path)")/skills"
+# Mirror each immediate subdirectory of $src into $dest, skipping ones that
+# already match. Shared by skills and extensions, which differ only in wording.
+_install_bundle_dirs() {
+  local src="$1" dest="$2" label="$3"
 
-  if [[ ! -d "$skills_src" ]]; then
-    warn "skills/ directory not found next to kdev — skipping."
+  if [[ ! -d "$src" ]]; then
+    warn "$(basename "$src")/ directory not found next to kdev — skipping."
     return 0
   fi
 
-  local dest="$HOME/.agents/skills"
   mkdir -p "$dest"
 
   local dir name copied=0 skipped=0
-  for dir in "$skills_src"/*/; do
+  for dir in "$src"/*/; do
     [[ -d "$dir" ]] || continue
     name="$(basename "$dir")"
     if [[ -d "$dest/$name" ]] && diff -rq "$dir" "$dest/$name" &>/dev/null; then
@@ -811,17 +801,21 @@ _install_skills() {
   done
 
   if [[ $copied -gt 0 ]]; then
-    info "Installed $copied skill(s) → ${dest}"
+    info "Installed $copied ${label}(s) → ${dest}"
   elif [[ $skipped -gt 0 ]]; then
-    dim "  [up to date]  $skipped skill(s)"
+    dim "  [up to date]  $skipped ${label}(s)"
   else
-    dim "  No skills found in ${skills_src}"
+    dim "  No ${label}s found in ${src}"
   fi
+}
+
+_install_skills() {
+  _install_bundle_dirs "$(_kdev_home)/skills" "$HOME/.agents/skills" "skill"
 }
 
 _install_global_agents_md() {
   local src
-  src="$(dirname "$(_script_path)")/global-agents.md"
+  src="$(_kdev_home)/global-agents.md"
 
   if [[ ! -f "$src" ]]; then
     warn "global-agents.md not found next to kdev — skipping."
@@ -840,36 +834,7 @@ _install_global_agents_md() {
 }
 
 _install_extensions() {
-  local ext_src
-  ext_src="$(dirname "$(_script_path)")/extensions"
-
-  if [[ ! -d "$ext_src" ]]; then
-    warn "extensions/ directory not found next to kdev — skipping."
-    return 0
-  fi
-
-  local dest="$HOME/.pi/agent/extensions"
-  mkdir -p "$dest"
-
-  local dir name copied=0 skipped=0
-  for dir in "$ext_src"/*/; do
-    [[ -d "$dir" ]] || continue
-    name="$(basename "$dir")"
-    if [[ -d "$dest/$name" ]] && diff -rq "$dir" "$dest/$name" &>/dev/null; then
-      ((skipped++)) || true
-      continue
-    fi
-    cp -R "$dir" "$dest/$name"
-    ((copied++)) || true
-  done
-
-  if [[ $copied -gt 0 ]]; then
-    info "Installed $copied extension(s) → ${dest}"
-  elif [[ $skipped -gt 0 ]]; then
-    dim "  [up to date]  $skipped extension(s)"
-  else
-    dim "  No extensions found in ${ext_src}"
-  fi
+  _install_bundle_dirs "$(_kdev_home)/extensions" "$HOME/.pi/agent/extensions" "extension"
 }
 
 _install_pi_package() {
@@ -1039,7 +1004,7 @@ cmd_setup() {
     fi
 
     local lazygit_src
-    lazygit_src="$(dirname "$(_script_path)")/.config/lazygit/config.yml"
+    lazygit_src="$(_kdev_home)/.config/lazygit/config.yml"
     local lazygit_conf="$HOME/.config/lazygit/config.yml"
     if [[ -f "$lazygit_conf" ]] && diff -q "$lazygit_src" "$lazygit_conf" &>/dev/null; then
       echo -e "  ${DIM}[up to date]${RESET}        lazygit config → ~/.config/lazygit/config.yml"
@@ -1051,7 +1016,7 @@ cmd_setup() {
     fi
 
     local skills_src
-    skills_src="$(dirname "$(_script_path)")/skills"
+    skills_src="$(_kdev_home)/skills"
     local skills_dest="$HOME/.agents/skills"
     if [[ -d "$skills_src" ]]; then
       local skill_count=0 skill_new=0 sdir sname
@@ -1075,7 +1040,7 @@ cmd_setup() {
     fi
 
     local ext_src
-    ext_src="$(dirname "$(_script_path)")/extensions"
+    ext_src="$(_kdev_home)/extensions"
     local ext_dest="$HOME/.pi/agent/extensions"
     if [[ -d "$ext_src" ]]; then
       local ext_count=0 ext_new=0 edir ename
@@ -1117,7 +1082,7 @@ cmd_setup() {
     fi
 
     local agents_src
-    agents_src="$(dirname "$(_script_path)")/global-agents.md"
+    agents_src="$(_kdev_home)/global-agents.md"
     local agents_dest="$HOME/.pi/agent/AGENTS.md"
     if [[ -f "$agents_src" ]]; then
       if [[ -f "$agents_dest" ]] && diff -q "$agents_src" "$agents_dest" &>/dev/null; then
@@ -1353,6 +1318,30 @@ _launch_session() {
   fi
 }
 
+# Create a worktree at $wt_dir for branch $name. Reuses the branch if it
+# already exists, otherwise branches off $from_ref (default branch when empty).
+# $verb is the progress wording ("Creating" / "Re-creating").
+_worktree_add() {
+  local repo_root="$1" name="$2" wt_dir="$3" from_ref="$4" verb="$5"
+
+  if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
+    step "$verb worktree ${BOLD}${name}${RESET} (existing branch)..."
+    git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
+      die "Failed to create worktree. Is branch '$name' already checked out?"
+    return 0
+  fi
+
+  [[ -z "$from_ref" ]] && { from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"; }
+  if [[ "$from_ref" != "HEAD" ]]; then
+    git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
+      die "Ref '$from_ref' does not exist."
+  fi
+
+  step "$verb worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
+  git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
+    die "Failed to create worktree."
+}
+
 # ─── Subcommand: dev ─────────────────────────────────────────────────────────
 
 cmd_dev() {
@@ -1386,9 +1375,8 @@ cmd_dev() {
 
   local wt_dir="$repo_root/$WORKTREES_DIR/$name"
 
-  # Fetch and warn about stale default branch before creating new worktree
-  if [[ ! -d "$wt_dir" || ! $(_git_worktree_valid "$wt_dir" 2>/dev/null) ]] \
-     && [[ -z "$from_ref" ]]; then
+  # Fetch and warn about stale default branch before creating a new worktree
+  if [[ -z "$from_ref" ]] && { [[ ! -d "$wt_dir" ]] || ! _git_worktree_valid "$wt_dir"; }; then
     _git_fetch_and_check "$repo_root" || return 1
   fi
 
@@ -1397,26 +1385,7 @@ cmd_dev() {
     mkdir -p "$repo_root/$WORKTREES_DIR"
     _ensure_gitignore "$repo_root" "$WORKTREES_DIR"
 
-    if [[ -z "$from_ref" ]]; then
-      from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"
-    fi
-
-    # Validate the from-ref
-    if [[ "$from_ref" != "HEAD" ]]; then
-      git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
-        die "Ref '$from_ref' does not exist."
-    fi
-
-    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
-      # Branch already exists — create worktree on existing branch
-      step "Creating worktree ${BOLD}${name}${RESET} (existing branch)..."
-      git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
-        die "Failed to create worktree. Is branch '$name' already checked out?"
-    else
-      step "Creating worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
-      git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
-        die "Failed to create worktree."
-    fi
+    _worktree_add "$repo_root" "$name" "$wt_dir" "$from_ref" "Creating"
 
     info "Worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
 
@@ -1430,23 +1399,7 @@ cmd_dev() {
     git -C "$repo_root" worktree prune 2>/dev/null || true
     mkdir -p "$repo_root/$WORKTREES_DIR"
 
-    if git -C "$repo_root" show-ref --verify --quiet "refs/heads/$name" 2>/dev/null; then
-      # Branch survived the rename — reattach to it
-      step "Re-creating worktree ${BOLD}${name}${RESET} (existing branch)..."
-      git -C "$repo_root" worktree add "$wt_dir" "$name" --quiet ||
-        die "Failed to recreate worktree."
-    else
-      if [[ -z "$from_ref" ]]; then
-        from_ref="$(_git_default_branch "$repo_root")" || from_ref="HEAD"
-      fi
-      if [[ "$from_ref" != "HEAD" ]]; then
-        git -C "$repo_root" rev-parse --verify "${from_ref}^{commit}" &>/dev/null ||
-          die "Ref '$from_ref' does not exist."
-      fi
-      step "Re-creating worktree ${BOLD}${name}${RESET} from ${CYAN}${from_ref}${RESET}..."
-      git -C "$repo_root" worktree add "$wt_dir" -b "$name" "$from_ref" --quiet ||
-        die "Failed to recreate worktree."
-    fi
+    _worktree_add "$repo_root" "$name" "$wt_dir" "$from_ref" "Re-creating"
 
     info "Repaired worktree ${BOLD}${name}${RESET} → branch ${CYAN}${name}${RESET}"
 
@@ -1936,6 +1889,32 @@ cmd_test() {
     _t_pass "G10 _git_default_branch detects default branch ($default_branch)"
   else
     _t_fail "G10 _git_default_branch detects default branch — got '$default_branch'"
+  fi
+
+  # G11: _backup_path returns .bak when free
+  local bp_dir="$TMPBASE/bp"
+  mkdir -p "$bp_dir"
+  touch "$bp_dir/conf"
+  if [[ "$(_backup_path "$bp_dir/conf")" == "$bp_dir/conf.bak" ]]; then
+    _t_pass "G11 _backup_path returns .bak when free"
+  else
+    _t_fail "G11 _backup_path returns .bak when free"
+  fi
+
+  # G12: _backup_path skips taken backup names
+  touch "$bp_dir/conf.bak" "$bp_dir/conf.bak1"
+  if [[ "$(_backup_path "$bp_dir/conf")" == "$bp_dir/conf.bak2" ]]; then
+    _t_pass "G12 _backup_path skips taken backup names"
+  else
+    _t_fail "G12 _backup_path skips taken backup names — got '$(_backup_path "$bp_dir/conf")'"
+  fi
+
+  # G13: _backup_existing moves the file aside
+  _backup_existing "$bp_dir/conf" "conf" >/dev/null
+  if [[ ! -e "$bp_dir/conf" && -f "$bp_dir/conf.bak2" ]]; then
+    _t_pass "G13 _backup_existing moves file to a free backup name"
+  else
+    _t_fail "G13 _backup_existing moves file to a free backup name"
   fi
 
   # Clean up test worktree
@@ -2905,9 +2884,9 @@ cmd_test() {
   _section "P — spawn skill"
 
   local spawn_sh
-  spawn_sh="$(dirname "$(_script_path)")/skills/spawn/spawn.sh"
+  spawn_sh="$(_kdev_home)/skills/spawn/spawn.sh"
   local spawn_skill_md
-  spawn_skill_md="$(dirname "$(_script_path)")/skills/spawn/SKILL.md"
+  spawn_skill_md="$(_kdev_home)/skills/spawn/SKILL.md"
 
   _t_check "P1 spawn.sh exists" test -f "$spawn_sh"
 
