@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.26.0"
+readonly VERSION="2.26.1"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2954,6 +2954,21 @@ cmd_test() {
     _t_pass "P11 log dir is /tmp/<repo-name> outside a worktree"
   else
     _t_fail "P11 log dir is /tmp/<repo-name> outside a worktree — got '$p11_out'"
+  fi
+
+  # P12: the actual suffix-generation line from spawn.sh must not abort
+  # under set -euo pipefail — `head -c6` closing the pipe early sends tr a
+  # SIGPIPE (exit 141), which pipefail turns into a fatal error unless
+  # guarded with `|| true`. Extract the real line from the file so this
+  # test tracks spawn.sh's actual content, not a duplicated snippet.
+  local suffix_line
+  suffix_line="$(grep -F 'tr -dc' "$spawn_sh" | head -1)"
+  local p12_out
+  p12_out="$(bash -c "set -euo pipefail; ${suffix_line}; echo reached-end:\$suffix" 2>&1 || true)"
+  if [[ -n "$suffix_line" && "$p12_out" == reached-end:* ]]; then
+    _t_pass "P12 spawn.sh's suffix generation survives SIGPIPE under set -euo pipefail"
+  else
+    _t_fail "P12 spawn.sh's suffix generation survives SIGPIPE under set -euo pipefail — got '$p12_out'"
   fi
 
   _section "V — Meta"

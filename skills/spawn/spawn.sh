@@ -90,7 +90,9 @@ _spawn_main() {
 
   local timestamp suffix log_file
   timestamp="$(date +%Y%m%d-%H%M%S)"
-  suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c6)"
+  # head -c6 closes the pipe early, causing tr to receive SIGPIPE (exit 141);
+  # with pipefail that would abort the whole script under set -e, so guard it.
+  suffix="$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c6 || true)"
   if [[ -z "$suffix" ]]; then
     suffix="$RANDOM"
   fi
