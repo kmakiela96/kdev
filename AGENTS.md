@@ -78,6 +78,7 @@ Test section prefixes:
 | X | Delete command (clean, dirty, --force) |
 | T | tmux layout (session, panes, windows) — gated on `command -v tmux` |
 | S | Setup (--plan output) |
+| P | spawn skill (spawn.sh install, log-dir selection, frontmatter) |
 | V | Meta (--version, --help, semver, unknown options) |
 
 To add a test: find the prefix, use the next number (e.g. `D9` exists, add `D10`), place adjacent to related tests.

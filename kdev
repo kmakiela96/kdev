@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.24.1"
+readonly VERSION="2.25.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2613,7 +2613,7 @@ cmd_test() {
   ) &>/dev/null
   local s8_ok=true
   local s8_skill
-  for s8_skill in ck cqs caveman monk; do
+  for s8_skill in ck cqs caveman monk spawn; do
     if [[ ! -f "$s8_dest/$s8_skill/SKILL.md" ]]; then
       s8_ok=false
       break
@@ -2896,6 +2896,60 @@ cmd_test() {
     fi
   else
     _t_skip "H4 here succeeds in git repo (tmux not installed)"
+  fi
+
+  _section "P — spawn skill"
+
+  local spawn_sh
+  spawn_sh="$(dirname "$(_script_path)")/skills/spawn/spawn.sh"
+  local spawn_skill_md
+  spawn_skill_md="$(dirname "$(_script_path)")/skills/spawn/SKILL.md"
+
+  _t_check "P1 spawn.sh exists" test -f "$spawn_sh"
+
+  if [[ -x "$spawn_sh" ]]; then
+    _t_pass "P2 spawn.sh is executable"
+  else
+    _t_fail "P2 spawn.sh is executable"
+  fi
+
+  _t_grep "P4 SKILL.md frontmatter has name: spawn" "^name: spawn" cat "$spawn_skill_md"
+  _t_grep "P5 SKILL.md frontmatter has license: MIT" "^license: MIT" cat "$spawn_skill_md"
+  _t_grep "P6 SKILL.md frontmatter has compatibility: opencode" "^compatibility: opencode" cat "$spawn_skill_md"
+  _t_grep "P7 SKILL.md metadata category is agent-orchestration" "category: agent-orchestration" cat "$spawn_skill_md"
+  _t_grep "P8 SKILL.md mentions spawn a subagent trigger" "spawn a subagent" cat "$spawn_skill_md"
+  _t_grep "P9 SKILL.md mentions delegate to a subagent trigger" "delegate to a subagent" cat "$spawn_skill_md"
+
+  # P10: log dir selection — inside a fake worktree, logs go under .spawn-logs/
+  local p10_repo="$TMPBASE/p10-repo"
+  local p10_worktree="$p10_repo/${WORKTREES_DIR}/feature-x"
+  mkdir -p "$p10_worktree"
+  git -C "$p10_repo" init --quiet
+  git -C "$p10_worktree" init --quiet 2>/dev/null || true
+  local p10_out
+  p10_out="$(cd "$p10_worktree" && bash -c '
+    source "'"$spawn_sh"'" 2>/dev/null
+    _spawn_log_dir
+  ' 2>/dev/null || true)"
+  if [[ "$p10_out" == *"/.worktrees/feature-x/.spawn-logs" ]]; then
+    _t_pass "P10 log dir under .spawn-logs/ inside a kdev worktree"
+  else
+    _t_fail "P10 log dir under .spawn-logs/ inside a kdev worktree — got '$p10_out'"
+  fi
+
+  # P11: log dir selection — outside a worktree (default branch), logs go to /tmp/<repo-name>
+  local p11_repo="$TMPBASE/p11-repo"
+  mkdir -p "$p11_repo"
+  git -C "$p11_repo" init --quiet
+  local p11_out
+  p11_out="$(cd "$p11_repo" && bash -c '
+    source "'"$spawn_sh"'" 2>/dev/null
+    _spawn_log_dir
+  ' 2>/dev/null || true)"
+  if [[ "$p11_out" == "/tmp/p11-repo" ]]; then
+    _t_pass "P11 log dir is /tmp/<repo-name> outside a worktree"
+  else
+    _t_fail "P11 log dir is /tmp/<repo-name> outside a worktree — got '$p11_out'"
   fi
 
   _section "V — Meta"

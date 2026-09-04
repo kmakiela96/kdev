@@ -131,7 +131,7 @@ Configs written:
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
 | `~/.config/nvim/`                            | Neovim config (plugins, fzf-lua LSP tabedit, gitsigns, tabby, tab keymaps) |
-| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk) |
+| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, spawn) |
 | `~/.pi/agent/extensions/`                    | pi extensions (ck-pi-extension)  |
 | `~/.pi/agent/AGENTS.md`                       | Global pi agent instructions      |
 | `~/.zshrc`                                   | Shell completions (appended)      |
@@ -371,6 +371,13 @@ The env var is auto-added to your shell rc file (zsh/bash/fish/POSIX).
 These are complementary:
 - **fff** → fuzzy/regex file and content search ("find `retryCount`")
 - **ck** → concept-level semantic search ("find retry logic", "error handling")
+
+## Skills
+
+`kdev setup` also installs pi agent skills into `~/.agents/skills/`, including
+**spawn** — delegates actual file-edit work to a non-interactive `pi -p`
+subagent and blocks on it with `wait` (never a polling loop) until it runs to
+completion, then surfaces its full log, exit code, and duration.
 
 ## Self-test
 
