@@ -80,6 +80,7 @@ Test section prefixes:
 | T | tmux layout (session, panes, windows) — gated on `command -v tmux` |
 | S | Setup (--plan output) |
 | P | spawn skill (spawn.sh install, log-dir selection, frontmatter) |
+| N | plan skill (storage modes, high-level rules, frontmatter) |
 | V | Meta (--version, --help, semver, unknown options) |
 
 To add a test: find the prefix, use the next number (e.g. `D9` exists, add `D10`), place adjacent to related tests.
