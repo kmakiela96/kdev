@@ -51,14 +51,15 @@ Before every commit:
 3. **Git helpers** — `_find_repo_root`, `_git_default_branch`, `_git_is_dirty`, `_ensure_gitignore`
 4. **tmux helpers** — `_tmux_session_name`, `_tmux_repo_sessions`, `_tmux_find_worktree_session`, `_tmux_next_session_name`, `_tmux_attach_or_switch`
 5. **Config generators** — `_tmux_conf_content`, `_alacritty_conf_content`
-6. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_write_alacritty_conf`, `_install_lf_config`, `_install_tmux_resurrect`, `_install_skills`, `_install_extensions`, `_install_pi_package`, `_ensure_pi_fff_override`, `_shell_rc_file`, `_install_global_agents_md`
-7. **Subcommand: setup** — `cmd_setup`
-8. **Layout** — `_setup_dev_layout` (3-pane tmux layout)
-9. **Session launcher** — `_launch_session` (shared by dev and launch)
-10. **Subcommands** — `cmd_dev`, `cmd_launch`, `cmd_list`, `cmd_delete`
-11. **Usage functions** — `usage_main`, `usage_dev`, `usage_launch`, `usage_list`, `usage_delete`, `usage_setup`
-12. **Self-test** — `cmd_test()`
-13. **Main dispatch** — `main()` case statement
+6. **Status predicates** — `_status_*` (read-only), `_plan_line`
+7. **Setup functions** — `_check_brew`, `_install_brew_formula`, `_install_brew_cask`, `_install_pi_agent`, `_write_tmux_conf`, `_write_alacritty_conf`, `_install_lf_config`, `_install_tmux_resurrect`, `_install_skills`, `_install_extensions`, `_install_pi_package`, `_ensure_pi_fff_override`, `_shell_rc_file`, `_install_global_agents_md`
+8. **Subcommand: setup** — `cmd_setup`
+9. **Layout** — `_setup_dev_layout` (3-pane tmux layout)
+10. **Session launcher** — `_launch_session` (shared by dev and launch)
+11. **Subcommands** — `cmd_dev`, `cmd_launch`, `cmd_list`, `cmd_delete`
+12. **Usage functions** — `usage_main`, `usage_dev`, `usage_launch`, `usage_list`, `usage_delete`, `usage_setup`
+13. **Self-test** — `cmd_test()`
+14. **Main dispatch** — `main()` case statement
 
 ## Tests
 
@@ -96,10 +97,23 @@ To add a test: find the prefix, use the next number (e.g. `D9` exists, add `D10`
 
 ### Adding a tool to setup
 
-1. Add install call in `cmd_setup()` (both real and `--plan` branches)
-2. Add check in the plan tools array
+1. Add install call in `cmd_setup()`
+2. Add the binary to the plan `tools` array
 3. Add test in S section
 4. Run `kdev --test`
+
+### Adding a config to setup
+
+Configs use a status/apply split. `--plan` never calls installers.
+
+1. Write `_status_<name>()` — read-only, echoes one of: `up-to-date`, `create`,
+   `overwrite`, `backup-create`, `install`, `installed`, `append`, `missing-src`
+2. Write `_install_<name>()` — `case "$(_status_<name>)"` to decide what to do
+3. Add one `_plan_line "$(_status_<name>)" "label"` to the plan branch
+4. Add an S-section test asserting the status is `up-to-date` after the install
+5. Run `kdev --test`
+
+Status functions must never mkdir, mv, or write — S43/S44 enforce this.
 
 ### Fixing a bug
 
