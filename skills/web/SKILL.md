@@ -61,3 +61,8 @@ Works great for: documentation sites, Wikipedia, GitHub pages, blogs, static sit
 - Use on JS-heavy sites (Twitter, Reddit modern, SPAs)
 - Expect images or media content
 - Forget protocol prefix
+- **Never use this skill to hit a search engine's results page** (`google.com/search`,
+  `bing.com/search`, `duckduckgo.com`, etc.). Search engines run aggressive
+  anti-scraping (Google in particular serves a CAPTCHA to non-browser clients
+  almost immediately). Use the **web-search** skill to find candidate URLs
+  first, then hand the chosen URL to *this* skill to read it.

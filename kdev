@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.25.0"
+readonly VERSION="2.26.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -956,6 +956,8 @@ cmd_setup() {
       "fzf:fzf:formula"
       "fd:fd:formula"
       "lynx:lynx:formula"
+      "ddgr:ddgr:formula"
+      "surfraw:surfraw:formula"
       "zathura:zathura:tap(homebrew-zathura/zathura)"
       "zathura-pdf-poppler:zathura:tap(homebrew-zathura/zathura)"
     )
@@ -1152,6 +1154,8 @@ cmd_setup() {
   _install_brew_formula fzf
   _install_brew_formula fd
   _install_brew_formula lynx
+  _install_brew_formula ddgr
+  _install_brew_formula surfraw
   _install_brew_tap_formula homebrew-zathura/zathura zathura
   _install_brew_tap_formula homebrew-zathura/zathura zathura-pdf-poppler
   _install_pi_agent

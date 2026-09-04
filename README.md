@@ -111,6 +111,8 @@ Installs (idempotent — safe to re-run):
 | node/npm          | `brew install`               |
 | fzf               | `brew install`               |
 | fd                | `brew install`               |
+| ddgr              | `brew install`               |
+| surfraw           | `brew install`               |
 | pi-coding-agent   | `npm install -g`             |
 | @ff-labs/pi-fff    | `pi install` (pi package)    |
 | tmux-resurrect    | `git clone` (plugin)         |
@@ -131,7 +133,7 @@ Configs written:
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
 | `~/.config/nvim/`                            | Neovim config (plugins, fzf-lua LSP tabedit, gitsigns, tabby, tab keymaps) |
-| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, spawn) |
+| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, spawn, web, web-search) |
 | `~/.pi/agent/extensions/`                    | pi extensions (ck-pi-extension)  |
 | `~/.pi/agent/AGENTS.md`                       | Global pi agent instructions      |
 | `~/.zshrc`                                   | Shell completions (appended)      |
