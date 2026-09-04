@@ -381,13 +381,28 @@ These are complementary:
 subagent and blocks on it with `wait` (never a polling loop) until it runs to
 completion, then surfaces its full log, exit code, and duration.
 
+```bash
+~/.agents/skills/spawn/spawn.sh "implement X and run the tests"
+~/.agents/skills/spawn/spawn.sh --model opus "do the hard refactor"
+~/.agents/skills/spawn/spawn.sh --no-approve "refactor Z, gate the edits"
+```
+
+| Flag | What |
+|------|------|
+| `--model, -m <pattern>` | Model for the subagent — passed to `pi --model`. Accepts fuzzy patterns (`sonnet`, `opus`), `provider/id`, or `provider/id:<thinking>`. Defaults to `$SPAWN_MODEL`, else pi's default. |
+| `--no-approve, -na` | Gate the subagent's edits behind approval (default is auto-approve) |
+
+The summary line reports the model used: `spawn: log=… exit=0 duration=12s
+model=opus`. Background several `spawn.sh` calls to fan out — each can run on
+a different model.
+
 ## Self-test
 
 ```bash
 kdev --test
 ```
 
-142 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
+158 tests covering git helpers, config generation (tmux + Alacritty + nav mode),
 dev/launch/list/delete/here commands (including broken worktree repair), tmux
 layout and session isolation (browser-tab model, max-one-window constraint),
 setup plan (including skills, extensions, and PI_FFF_MODE install), and meta flags.

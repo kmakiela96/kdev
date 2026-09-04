@@ -2,9 +2,10 @@
 # spawn.sh — run a pi subagent non-interactively, to completion, blocking.
 #
 # Usage:
-#   spawn.sh [--no-approve] "<prompt text>"
+#   spawn.sh [--no-approve] [--model <pattern>] "<prompt text>"
 #
 # Runs `pi -p --approve "<prompt>"` (or --no-approve) in the background,
+# optionally with `--model <pattern>` to pick the subagent's model,
 # captures stdout+stderr to a log file, and blocks on it with `wait` — never
 # a sleep-polling loop. On completion prints the full log, then a one-line
 # summary (log path, exit code, duration), and exits with the subagent's
@@ -16,7 +17,12 @@
 set -euo pipefail
 
 _spawn_usage() {
-  echo "Usage: $(basename "$0") [--no-approve] \"<prompt text>\"" >&2
+  echo "Usage: $(basename "$0") [--no-approve] [--model <pattern>] \"<prompt text>\"" >&2
+  echo "" >&2
+  echo "  --model, -m <pattern>  model pattern or ID passed to pi" >&2
+  echo "                         (e.g. sonnet, opus, anthropic/claude-sonnet-4-5," >&2
+  echo "                          openai/gpt-5:high). Defaults to pi's own default," >&2
+  echo "                         or \$SPAWN_MODEL if set." >&2
   exit 1
 }
 
@@ -44,11 +50,28 @@ _spawn_log_dir() {
 
 _spawn_main() {
   local approve_flag="--approve"
+  local model="${SPAWN_MODEL:-}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-approve|-na)
         approve_flag="--no-approve"
+        shift
+        ;;
+      --model|-m)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          echo "Missing value for $1" >&2
+          _spawn_usage
+        fi
+        model="$2"
+        shift 2
+        ;;
+      --model=*|-m=*)
+        model="${1#*=}"
+        if [[ -z "$model" ]]; then
+          echo "Missing value for --model" >&2
+          _spawn_usage
+        fi
         shift
         ;;
       -h|--help)
@@ -101,7 +124,12 @@ _spawn_main() {
   local start_ts
   start_ts=$(date +%s)
 
-  pi -p "$approve_flag" "$prompt" >"$log_file" 2>&1 &
+  local -a pi_args=(-p "$approve_flag")
+  if [[ -n "$model" ]]; then
+    pi_args+=(--model "$model")
+  fi
+
+  pi "${pi_args[@]}" "$prompt" >"$log_file" 2>&1 &
   local pid=$!
 
   local exit_code=0
@@ -113,7 +141,7 @@ _spawn_main() {
 
   cat "$log_file"
 
-  echo "spawn: log=$log_file exit=$exit_code duration=${duration}s"
+  echo "spawn: log=$log_file exit=$exit_code duration=${duration}s model=${model:-default}"
 
   return "$exit_code"
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.27.0"
+readonly VERSION="2.28.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2986,6 +2986,56 @@ cmd_test() {
     _t_pass "P12 spawn.sh's suffix generation survives SIGPIPE under set -euo pipefail"
   else
     _t_fail "P12 spawn.sh's suffix generation survives SIGPIPE under set -euo pipefail — got '$p12_out'"
+  fi
+
+  # P13–P16: --model support
+  _t_grep "P13 spawn.sh accepts --model" "[-][-]model" cat "$spawn_sh"
+  _t_grep "P14 spawn.sh usage documents --model" "[-][-]model" \
+    bash -c "bash '$spawn_sh' --help 2>&1 || true"
+  _t_grep "P15 SKILL.md documents choosing the model" "Choosing the model" cat "$spawn_skill_md"
+  _t_grep "P16 SKILL.md description mentions model" "^description:.*model" cat "$spawn_skill_md"
+
+  # P17: --model with no value is a usage error
+  if bash "$spawn_sh" --model &>/dev/null; then
+    _t_fail "P17 spawn.sh --model without value errors"
+  else
+    _t_pass "P17 spawn.sh --model without value errors"
+  fi
+
+  # P18: the model flag is forwarded to pi as `--model <pattern>` — verify by
+  # running spawn.sh with a fake `pi` on PATH that echoes its own argv.
+  local p18_bin="$TMPBASE/p18-bin"
+  mkdir -p "$p18_bin"
+  cat >"$p18_bin/pi" <<'FAKEPI'
+#!/usr/bin/env bash
+echo "ARGS: $*"
+FAKEPI
+  chmod +x "$p18_bin/pi"
+  local p18_out
+  p18_out="$(cd "$TMPBASE" && PATH="$p18_bin:$PATH" bash "$spawn_sh" -m my/model:high "do a thing" 2>&1 || true)"
+  if [[ "$p18_out" == *"--model my/model:high"* && "$p18_out" == *"model=my/model:high"* ]]; then
+    _t_pass "P18 spawn.sh forwards --model to pi and reports it"
+  else
+    _t_fail "P18 spawn.sh forwards --model to pi and reports it — got '$p18_out'"
+  fi
+
+  # P19: without --model, no --model flag is passed to pi (pi default wins)
+  local p19_out
+  p19_out="$(cd "$TMPBASE" && PATH="$p18_bin:$PATH" bash "$spawn_sh" "do a thing" 2>&1 || true)"
+  if [[ "$p19_out" != *"--model"* && "$p19_out" == *"model=default"* ]]; then
+    _t_pass "P19 spawn.sh omits --model when none requested"
+  else
+    _t_fail "P19 spawn.sh omits --model when none requested — got '$p19_out'"
+  fi
+
+  # P20: SPAWN_MODEL provides the default, explicit --model overrides it
+  local p20_out p20b_out
+  p20_out="$(cd "$TMPBASE" && PATH="$p18_bin:$PATH" SPAWN_MODEL=env/model bash "$spawn_sh" "x" 2>&1 || true)"
+  p20b_out="$(cd "$TMPBASE" && PATH="$p18_bin:$PATH" SPAWN_MODEL=env/model bash "$spawn_sh" --model=cli/model "x" 2>&1 || true)"
+  if [[ "$p20_out" == *"--model env/model"* && "$p20b_out" == *"--model cli/model"* ]]; then
+    _t_pass "P20 SPAWN_MODEL is the default, --model overrides it"
+  else
+    _t_fail "P20 SPAWN_MODEL is the default, --model overrides it — got '$p20_out' / '$p20b_out'"
   fi
 
   _section "N — plan skill"
