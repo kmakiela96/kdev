@@ -1,22 +1,28 @@
 ---
 name: plan
-description: "Create and maintain a high-level plan for the current branch. One plan per branch, stored outside git in worktree mode, at repo root (never staged) on a normal branch. Triggers: plan, make plan, update plan, show plan, check off, mark done."
+description: "Create and maintain topic-named high-level plans for the project, each stored as its own checklist file in the repo root. Triggers: plan, make plan, update plan, show plan, check off, mark done."
 license: MIT
 compatibility: opencode
 metadata:
   category: planning
 ---
 
-# plan — Branch Plan Management
+# plan — Project Plan Management
 
 ## Overview
 
-Each branch gets one plan. A plan is a **high-level** markdown checklist describing
-*what* has to be achieved and *why* — never a file-by-file edit script.
+A project can have any number of plans, each about a distinct topic or effort
+(a new module, a refactor, a migration). A plan is a **high-level** markdown
+checklist describing *what* has to be achieved and *why* — never a
+file-by-file edit script. It is committed to the repo like any other file.
+When a plan is finished, the user deletes it — the agent never deletes it
+automatically.
 
 ## Level of Abstraction
 
-A plan describes outcomes and behaviour, not code mechanics.
+There is only one detail level. A plan describes outcomes and behaviour, not code
+mechanics — it can be as detailed as needed conceptually, but never points at
+implementation locations.
 
 **Never include:**
 - Which files to create or edit, or paths/line numbers
@@ -27,70 +33,33 @@ A plan describes outcomes and behaviour, not code mechanics.
 
 **Do include:**
 - The goal and the constraints/invariants that must hold
-- Behavioural outcomes per step ("retries stop on non-retryable errors")
+- Behavioural or conceptual outcomes per step ("remodel the ADTs so state is a
+  closed sum type instead of optional fields")
 - Sequencing and dependencies between steps
 - Risks, open questions, decisions to make
 - How the change will be *verified at a system level* — integration and
   e2e test setup (harness, fixtures, environments, seed data, CI wiring) is in
   scope; enumerating individual unit tests is not
 
-If you catch yourself naming a file or a test case, raise the abstraction level.
+If you catch yourself naming a file, symbol, or test case, raise the abstraction level.
 
 ## Storage
 
-First determine the mode:
-
-```bash
-git rev-parse --git-dir            # a worktree has a gitdir like <repo>/.git/worktrees/<name>
-git rev-parse --show-toplevel
-```
-
-You are in **worktree mode** if the current checkout is a linked git worktree
-(commonly under `<repo>/.worktrees/<branch>`), otherwise **branch mode**.
-
-### Worktree mode
-
-Unchanged behaviour — plan lives outside the worktree:
-
-```bash
-branch_name="$(basename "$PWD")"
-plan_dir="../${branch_name}.plan"
-plan_file="${plan_dir}/plan.md"
-```
-
-This resolves to `<repo>/.worktrees/<branch>.plan/plan.md`, a sibling of the
-worktree inside the already-gitignored `.worktrees/` folder. Create the
-directory if missing.
-
-### Branch mode (normal checkout)
-
-Store the plan at the repository root:
+Plan location: `PLAN_<TOPIC>.md` in the repository root, where `<TOPIC>` is an
+uppercase, underscore-separated short name describing what the plan is about
+(e.g. `PLAN_NEW_HTTP_MODULE.md`, `PLAN_REFACTOR_AUTH.md`).
 
 ```bash
 repo_root="$(git rev-parse --show-toplevel)"
-branch_name="$(git rev-parse --abbrev-ref HEAD)"
-plan_file="${repo_root}/$(basename "$branch_name").plan.md"
+plan_file="${repo_root}/PLAN_<TOPIC>.md"
 ```
 
-Rules for branch mode:
-- **Never** `git add`, `git stage`, or `git commit` the plan file.
-- **Never** add it to `.gitignore` or `.git/info/exclude` unless the user asks.
-- If you run `git add -A` style commands, exclude the plan file; prefer explicit
-  paths when staging.
-- If the user asks to commit work while a plan file exists, stage only the real
-  changes and mention the plan file was left untracked on purpose.
-
-## Detail Modes
-
-Default: **full**. Switch with `/plan lite`, `/plan full`, `/plan ultra`.
-
-Modes control how much detail per step. All modes stay high-level.
-
-| Mode | Step detail |
-|---|---|
-| **lite** | One-liner outcome per step. No substeps. |
-| **full** | One or two notes under each step: intent, constraint, or dependency. |
-| **ultra** | Notes plus risks/open questions and acceptance criteria per step. |
+Rules:
+- Derive `<TOPIC>` from the goal of the plan, kept short (2-5 words).
+- Never create two plan files for the same topic — update the existing one instead.
+- Different topics get different files; do not merge unrelated efforts into one plan file.
+- The plan file is a normal tracked file — commit it like any other change.
+- Never delete it. Only the user deletes it, once that plan is finished.
 
 ## Plan Structure
 
@@ -104,28 +73,14 @@ Modes control how much detail per step. All modes stay high-level.
 ## Steps
 
 - [ ] Step 1
+  - conceptual context: intent, constraint, or dependency
 - [ ] Step 2
 - [ ] Step 3
 ```
 
-### lite example
+### example
 
-```markdown
-# Retry failed API requests
-
-**Goal:** Transient upstream failures stop surfacing to callers
-
-**Status:** in-progress
-
-## Steps
-
-- [x] Make retry behaviour configurable
-- [ ] Retry transient failures with exponential backoff
-- [ ] Stand up an integration environment with a flaky endpoint
-- [ ] Document the new behaviour
-```
-
-### full example
+`PLAN_RETRY_HTTP_CLIENT.md`:
 
 ```markdown
 # Retry failed API requests
@@ -141,60 +96,23 @@ Modes control how much detail per step. All modes stay high-level.
 - [ ] Retry transient failures with exponential backoff
   - Only transient failures retry; client errors surface immediately
   - Backoff must be bounded and jittered
+  - ⚠️ Retrying non-idempotent writes risks duplicate side effects — decide
+    whether callers must opt in for those
 - [ ] Stand up an integration environment with a flaky endpoint
   - Controllable failure injection, deterministic timing in CI
 - [ ] Document the new behaviour
   - Cover defaults, opt-out, and which failures retry
-```
-
-### ultra example
-
-```markdown
-# Retry failed API requests
-
-**Goal:** Transient upstream failures stop surfacing to callers
-
-**Status:** in-progress
-
-## Steps
-
-- [x] Make retry behaviour configurable
-  - Existing callers keep working with no changes
-  - ⚠️ Config surface is public — decide names once, they are hard to change
-  - ✅ Defaults applied when unconfigured; retries can be disabled
-
-- [ ] Retry transient failures with exponential backoff
-  - Transient = rate limiting, upstream server failure, network interruption
-  - Non-transient client errors must never retry
-  - Backoff bounded by a ceiling and jittered to avoid synchronised retries
-  - Cancellation must interrupt a pending retry
-  - ⚠️ Retrying non-idempotent writes risks duplicate side effects — decide
-    whether callers must opt in for those
-  - ✅ Transient failures recover silently; client errors and cancellation are
-    immediate
-
-- [ ] Stand up an integration environment with a flaky endpoint
-  - Failure injection controllable per scenario
-  - Timing made deterministic so CI is not flaky
-  - Wire the suite into CI as a required check
-  - ⚠️ Real-time waits make the suite slow — plan for time control
-  - ✅ End-to-end recovery is observable in CI, reliably
-
-- [ ] Document the new behaviour
-  - Defaults, opt-out, retryable vs non-retryable failures, idempotency caveat
   - ✅ A caller can predict retry behaviour from the docs alone
 ```
 
 ## Behavior Rules
 
-1. **Detect mode first.** Worktree → `../<branch>.plan/plan.md`; branch →
-   `<repo_root>/<branch>.plan.md`, never staged or committed.
+1. **One plan file per topic, any number of topics.** Name each file `PLAN_<TOPIC>.md`. Never create a second file for the same topic — update the existing one.
 2. **Stay high-level.** No file paths, no symbol names, no unit-test lists.
-3. **One plan per branch.** Never create a second plan file. Update the existing one.
-4. **Check off steps** by changing `- [ ]` to `- [x]` as work completes.
-5. **Update status** field as plan progresses.
-6. **Read plan first** before any update — never overwrite blindly.
-7. **When user says "plan"** without context — show the current plan if it exists, or ask what to plan.
-8. **When user says "update plan"** — read the current plan, check off completed steps, add new steps if needed.
-9. **Persist mode** across the session. Default is full. Switch only when user says `/plan lite|full|ultra`.
-10. **Create plan** only when user asks to make/create/write a plan. Do not auto-create.
+3. **Check off steps** by changing `- [ ]` to `- [x]` as work completes.
+4. **Update status** field as plan progresses.
+5. **Read plan first** before any update — never overwrite blindly.
+6. **When user says "plan"** without a topic — if exactly one `PLAN_*.md` file exists, show it; if several exist, ask which topic; if none exist, ask what to plan.
+7. **When user says "update plan"** — identify the topic (from context or by asking), read that plan file, check off completed steps, add new steps if needed.
+8. **Create a plan** only when user asks to make/create/write a plan. Do not auto-create. Pick a topic name for the file based on the goal.
+9. **Never delete a plan file.** Only the user deletes it, once that plan is finished.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.28.0"
+readonly VERSION="2.28.2"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -3045,12 +3045,12 @@ FAKEPI
 
   _t_check "N1 plan SKILL.md exists" test -f "$plan_skill_md"
   _t_grep "N2 frontmatter has name: plan" "^name: plan" cat "$plan_skill_md"
-  _t_grep "N3 documents worktree mode plan path" "[.]plan/plan[.]md" cat "$plan_skill_md"
-  _t_grep "N4 documents branch mode plan path at repo root" "show-toplevel" cat "$plan_skill_md"
-  _t_grep "N5 forbids staging or committing the plan" "Never.*git add" cat "$plan_skill_md"
+  _t_grep "N3 documents plan path at repo root" "show-toplevel" cat "$plan_skill_md"
+  _t_grep "N4 documents PLAN_<TOPIC>.md naming" "PLAN_<TOPIC>[.]md" cat "$plan_skill_md"
+  _t_grep "N5 forbids deleting a plan file" "Never delete" cat "$plan_skill_md"
   _t_grep "N6 forbids file paths and symbol names in plans" "Never include" cat "$plan_skill_md"
   _t_grep "N7 allows integration and e2e test planning" "integration and" cat "$plan_skill_md"
-  _t_grep "N8 requires detecting worktree vs branch mode" "Detect mode first" cat "$plan_skill_md"
+  _t_grep "N8 allows any number of topic plans" "any number of topics" cat "$plan_skill_md"
 
   _section "V — Meta"
 
