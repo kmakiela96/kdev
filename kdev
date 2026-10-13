@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.28.2"
+readonly VERSION="2.28.3"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -339,7 +339,7 @@ bind -T nav n if-shell -F '#{==:#{window_panes},4}' 'select-layout tiled' 'set-w
 bind -T nav d kill-pane \; switch-client -T nav
 
 # Nav: new pi agent pane (p) — vertical split, exits nav
-bind -T nav p split-window -v -c "#{pane_current_path}" "pi" \; switch-client -T root
+bind -T nav p split-window -v -c "#{pane_current_path}" "pi --tui-mode regular" \; switch-client -T root
 
 # Nav: new terminal pane (t) — vertical split, exits nav
 bind -T nav t split-window -v -c "#{pane_current_path}" \; switch-client -T root
@@ -1164,7 +1164,7 @@ _setup_dev_layout() {
 
   local agent_cmd
   if command -v pi &>/dev/null; then
-    agent_cmd="cd $quoted_dir && pi"
+    agent_cmd="cd $quoted_dir && pi --tui-mode regular"
   else
     warn "pi-coding-agent not found — using shell. Install: npm i -g @earendil-works/pi-coding-agent"
     agent_cmd="cd $quoted_dir"
@@ -1959,6 +1959,20 @@ cmd_test() {
     _t_pass "C10 tmux conf includes nav mode pi agent pane binding"
   else
     _t_fail "C10 tmux conf includes nav mode pi agent pane binding"
+  fi
+
+  # C10b: nav mode pi pane starts in regular tui mode
+  if echo "$tmux_content" | grep -q 'bind -T nav p .*pi --tui-mode regular'; then
+    _t_pass "C10b nav mode pi pane uses regular tui mode"
+  else
+    _t_fail "C10b nav mode pi pane uses regular tui mode"
+  fi
+
+  # C10c: dev layout starts pi in regular tui mode
+  if declare -f _setup_dev_layout | grep -q 'pi --tui-mode regular'; then
+    _t_pass "C10c dev layout starts pi in regular tui mode"
+  else
+    _t_fail "C10c dev layout starts pi in regular tui mode"
   fi
 
   # C12: tmux conf includes nav mode terminal pane (t)

@@ -277,7 +277,7 @@ the prefix. Press `Ctrl-a` or `Esc` to exit.
 | `f`        | Toggle pane zoom (fullscreen)   |
 | `n`        | Normalize layout (50% left, 25%/25% right) |
 | `d`        | Kill current pane               |
-| `p`        | New pi agent pane (vertical split) |
+| `p`        | New pi agent pane (vertical split, regular TUI mode) |
 | `t`        | New terminal pane (vertical split) |
 | `Ctrl-a`   | Exit nav mode                   |
 | `Esc`      | Exit nav mode                   |
