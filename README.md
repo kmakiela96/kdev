@@ -133,7 +133,7 @@ Configs written:
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
 | `~/.config/nvim/`                            | Neovim config (plugins, fzf-lua LSP tabedit, gitsigns, tabby, tab keymaps) |
-| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, spawn, web, web-search) |
+| `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, web, web-search) |
 | `~/.pi/agent/extensions/`                    | pi extensions (ck-pi-extension)  |
 | `~/.pi/agent/AGENTS.md`                       | Global pi agent instructions      |
 | `~/.zshrc`                                   | Shell completions (appended)      |
@@ -376,25 +376,7 @@ These are complementary:
 
 ## Skills
 
-`kdev setup` also installs pi agent skills into `~/.agents/skills/`, including
-**spawn** — delegates actual file-edit work to a non-interactive `pi -p`
-subagent and blocks on it with `wait` (never a polling loop) until it runs to
-completion, then surfaces its full log, exit code, and duration.
-
-```bash
-~/.agents/skills/spawn/spawn.sh "implement X and run the tests"
-~/.agents/skills/spawn/spawn.sh --model opus "do the hard refactor"
-~/.agents/skills/spawn/spawn.sh --no-approve "refactor Z, gate the edits"
-```
-
-| Flag | What |
-|------|------|
-| `--model, -m <pattern>` | Model for the subagent — passed to `pi --model`. Accepts fuzzy patterns (`sonnet`, `opus`), `provider/id`, or `provider/id:<thinking>`. Defaults to `$SPAWN_MODEL`, else pi's default. |
-| `--no-approve, -na` | Gate the subagent's edits behind approval (default is auto-approve) |
-
-The summary line reports the model used: `spawn: log=… exit=0 duration=12s
-model=opus`. Background several `spawn.sh` calls to fan out — each can run on
-a different model.
+`kdev setup` also installs pi agent skills into `~/.agents/skills/`.
 
 ## Self-test
 
