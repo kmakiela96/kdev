@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.30.0"
+readonly VERSION="2.30.1"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -1400,8 +1400,8 @@ cmd_here() {
   repo_root="$(_find_repo_root)" || die "Not inside a git repository."
 
   local branch
-  branch="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null \
-    || git -C "$repo_root" symbolic-ref --short HEAD 2>/dev/null)" \
+  branch="$(git -C "$repo_root" symbolic-ref --short HEAD 2>/dev/null \
+    || git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
     || die "Could not determine current branch."
 
   [[ "$branch" == "HEAD" ]] && die "Detached HEAD state — cannot use 'here'."
@@ -2929,8 +2929,11 @@ cmd_test() {
   mkdir -p "$empty_repo"
   git -C "$empty_repo" init --quiet
   local h5_branch
-  h5_branch="$(git -C "$empty_repo" symbolic-ref --short HEAD 2>/dev/null)"
-  if [[ -n "$h5_branch" ]]; then
+  h5_branch="$(
+    _launch_session() { printf '%s' "$2"; }
+    cd "$empty_repo" && cmd_here 2>/dev/null
+  )"
+  if [[ "$h5_branch" != *$'\n'* && "$h5_branch" != "HEAD" && -n "$h5_branch" ]]; then
     _t_pass "H5 here resolves branch on empty repo"
   else
     _t_fail "H5 here resolves branch on empty repo"
