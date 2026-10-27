@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.28.4"
+readonly VERSION="2.30.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2592,6 +2592,20 @@ cmd_test() {
     _t_pass "S8 _install_skills copies skills to ~/.agents/skills/"
   else
     _t_fail "S8 _install_skills copies skills to ~/.agents/skills/"
+  fi
+
+  # S9a: scala-reviewer skill is installed
+  if [[ -f "$TMPBASE/s8_home/.agents/skills/scala-reviewer/SKILL.md" ]]; then
+    _t_pass "S9a _install_skills installs scala-reviewer"
+  else
+    _t_fail "S9a _install_skills installs scala-reviewer"
+  fi
+
+  # S9b: typescript-reviewer skill is installed
+  if [[ -f "$TMPBASE/s8_home/.agents/skills/typescript-reviewer/SKILL.md" ]]; then
+    _t_pass "S9b _install_skills installs typescript-reviewer"
+  else
+    _t_fail "S9b _install_skills installs typescript-reviewer"
   fi
 
   # S9: _install_skills is idempotent (re-run succeeds)
