@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.30.1"
+readonly VERSION="2.31.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2890,6 +2890,22 @@ cmd_test() {
     _t_pass "S37 fzf.lua calls references with nil context"
   else
     _t_fail "S37 fzf.lua calls references with nil context"
+  fi
+
+  # S38: render-markdown plugin installed with <leader>mr toggle, markdown-only
+  if grep -qF 'RenderMarkdown toggle' "$TMPBASE/s32_home/.config/nvim/lua/plugins/render-markdown.lua" \
+     && grep -qF '<leader>mr' "$TMPBASE/s32_home/.config/nvim/lua/plugins/render-markdown.lua" \
+     && grep -qF 'ft = "markdown"' "$TMPBASE/s32_home/.config/nvim/lua/plugins/render-markdown.lua"; then
+    _t_pass "S38 render-markdown.lua maps <leader>mr for markdown"
+  else
+    _t_fail "S38 render-markdown.lua maps <leader>mr for markdown"
+  fi
+
+  # S39: treesitter installs markdown parsers
+  if grep -qF '"markdown", "markdown_inline"' "$TMPBASE/s32_home/.config/nvim/lua/plugins/treesitter.lua"; then
+    _t_pass "S39 treesitter parsers include markdown and markdown_inline"
+  else
+    _t_fail "S39 treesitter parsers include markdown and markdown_inline"
   fi
 
   # ─── V — Meta ────────────────────────────────────────────────────────

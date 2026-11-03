@@ -132,7 +132,7 @@ Configs written:
 | `~/.config/tmux/tmux.conf`                   | Full tmux config (Tokyo Night)    |
 | `~/.config/tmux/plugins/tmux-resurrect/`     | Session persistence plugin        |
 | `~/.config/lf/`                              | lf config (lfrc, scope, icons)    |
-| `~/.config/nvim/`                            | Neovim config (plugins, fzf-lua LSP tabedit, gitsigns, tabby, tab keymaps) |
+| `~/.config/nvim/`                            | Neovim config (plugins, fzf-lua LSP tabedit, gitsigns, tabby, render-markdown with `<leader>mr` toggle, tab keymaps) |
 | `~/.agents/skills/`                          | pi agent skills (ck, cqs, caveman, monk, web, web-search, scala-reviewer, typescript-reviewer) |
 | `~/.pi/agent/extensions/`                    | pi extensions (ck-pi-extension)  |
 | `~/.pi/agent/AGENTS.md`                       | Global pi agent instructions      |

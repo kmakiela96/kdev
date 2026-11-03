@@ -3,7 +3,7 @@ return {
   build = ":TSUpdate",
   lazy = false,
   config = function()
-    local parsers = { "scala", "lua", "bash", "json", "yaml", "rust", "toml" }
+    local parsers = { "scala", "lua", "bash", "json", "yaml", "rust", "toml", "markdown", "markdown_inline" }
     for _, parser in ipairs(parsers) do
       if not pcall(vim.treesitter.query.get, parser, "highlights") then
         vim.cmd.TSInstall(parser)
