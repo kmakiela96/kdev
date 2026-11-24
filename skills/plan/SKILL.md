@@ -76,6 +76,11 @@ Rules:
   - conceptual context: intent, constraint, or dependency
 - [ ] Step 2
 - [ ] Step 3
+
+## Open Questions
+
+- [ ] Question about something unclear or undecided
+  - why it matters / which step it affects
 ```
 
 ### example
@@ -103,6 +108,13 @@ Rules:
 - [ ] Document the new behaviour
   - Cover defaults, opt-out, and which failures retry
   - ✅ A caller can predict retry behaviour from the docs alone
+
+## Open Questions
+
+- [ ] Should non-idempotent writes retry at all, or only on caller opt-in?
+  - Affects the backoff step
+- [ ] Which upstream status codes count as transient?
+  - Affects the backoff step and the integration environment
 ```
 
 ## Behavior Rules
@@ -116,3 +128,4 @@ Rules:
 7. **When user says "update plan"** — identify the topic (from context or by asking), read that plan file, check off completed steps, add new steps if needed.
 8. **Create a plan** only when user asks to make/create/write a plan. Do not auto-create. Pick a topic name for the file based on the goal.
 9. **Never delete a plan file.** Only the user deletes it, once that plan is finished.
+10. **Record doubts in `## Open Questions`.** If unsure about anything (requirements, scope, constraints, trade-offs), do not guess silently — add it as a `- [ ]` question in the plan's `## Open Questions` section, noting which step it affects. Keep the section even if empty on a draft.
