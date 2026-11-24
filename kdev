@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_NAME="kdev"
-readonly VERSION="2.31.0"
+readonly VERSION="2.32.0"
 readonly WORKTREES_DIR=".worktrees"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
@@ -2606,6 +2606,13 @@ cmd_test() {
     _t_pass "S9b _install_skills installs typescript-reviewer"
   else
     _t_fail "S9b _install_skills installs typescript-reviewer"
+  fi
+
+  # S9c: rust-reviewer skill is installed
+  if [[ -f "$TMPBASE/s8_home/.agents/skills/rust-reviewer/SKILL.md" ]]; then
+    _t_pass "S9c _install_skills installs rust-reviewer"
+  else
+    _t_fail "S9c _install_skills installs rust-reviewer"
   fi
 
   # S9: _install_skills is idempotent (re-run succeeds)
